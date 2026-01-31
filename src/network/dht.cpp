@@ -7,10 +7,6 @@
 
 namespace network {
 
-// ============================================================================
-// Serialization helpers
-// ============================================================================
-
 namespace {
 
 void write_u8(std::vector<uint8_t>& out, uint8_t value) {
@@ -86,10 +82,6 @@ std::string read_string(const uint8_t*& ptr, size_t& remaining) {
 }
 
 } // anonymous namespace
-
-// ============================================================================
-// DHTMessage implementation
-// ============================================================================
 
 std::vector<uint8_t> DHTMessage::serialize() const {
     std::vector<uint8_t> data;
@@ -171,10 +163,6 @@ std::optional<DHTMessage> DHTMessage::deserialize(const std::vector<uint8_t>& da
     
     return msg;
 }
-
-// ============================================================================
-// DHT implementation
-// ============================================================================
 
 DHT::DHT(const crypto::Keypair& keypair)
     : local_id_(NodeId::from_public_key(keypair.public_key()))

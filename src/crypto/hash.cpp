@@ -1,5 +1,5 @@
 #include "hash.h"
-#include "keypair.h" // for init()
+#include "keypair.h"
 
 #include <sodium.h>
 #include <stdexcept>

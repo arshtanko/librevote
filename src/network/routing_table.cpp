@@ -4,10 +4,6 @@
 
 namespace network {
 
-// ============================================================================
-// KBucket implementation
-// ============================================================================
-
 bool KBucket::add_or_update(const PeerInfo& peer) {
     // Check if peer already exists
     auto it = std::find_if(peers_.begin(), peers_.end(),
@@ -72,10 +68,6 @@ void KBucket::touch(const NodeId& id) {
         peers_.splice(peers_.end(), peers_, it);
     }
 }
-
-// ============================================================================
-// RoutingTable implementation
-// ============================================================================
 
 RoutingTable::RoutingTable(const NodeId& local_id) : local_id_(local_id) {}
 

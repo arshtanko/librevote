@@ -22,6 +22,11 @@ using Seed = std::array<uint8_t, SEED_SIZE>;
 class Keypair {
 public:
     /**
+     * Default constructor (creates empty keypair, use generate() instead)
+     */
+    Keypair() = default;
+
+    /**
      * Generate a new random key pair
      */
     static Keypair generate();
