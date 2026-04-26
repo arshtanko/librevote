@@ -2,7 +2,7 @@
 
 This document defines the initial trustee selection protocol for LibreVote anonymous elections.
 
-The protocol is used before the main anonymous election. Its purpose is to select a small group of trustees who will later participate in the anonymous voting setup and tally process.
+The protocol is used before the main anonymous election. Its purpose is to select a small group of trustees for the anonymous voting setup and tally process.
 
 ## Goals
 
@@ -10,7 +10,7 @@ The protocol is used before the main anonymous election. Its purpose is to selec
 - Let eligible voters publicly choose trustees.
 - Require every selected trustee to explicitly consent before the anonymous election starts.
 - Keep trustee selection simple and deterministic for the first implementation.
-- Support `blind_token_v1` for the first anonymous voting mode while keeping room for future migration to `zk_membership_v1`.
+- Use `blind_token_v1` as the v1 anonymous voting mode.
 
 ## Non-Goals
 
@@ -57,6 +57,7 @@ Trustee candidates self-nominate by publishing a signed nomination object.
 TrusteeNomination {
   trustee_selection_id
   candidate_public_key
+  candidate_blind_token_public_key
   candidate_node_peer_id
   statement
   created_at
@@ -70,8 +71,11 @@ Validation rules:
 - The nomination signature must be valid for `candidate_public_key`.
 - The nomination must reference an existing trustee selection election.
 - The nomination must be submitted within the nomination window.
-- The candidate must not already have a valid nomination for the same trustee selection election.
+- Repeated nominations with the same `candidate_public_key` form a conflict group.
+- Repeated nominations with the same `candidate_blind_token_public_key` form a conflict group.
 - The proof-of-work must satisfy the required difficulty for nomination objects.
+
+If the conflict group contains more than one valid `TrusteeNomination`, the whole group is excluded from trustee selection.
 
 ## Trustee Voting
 
@@ -101,16 +105,18 @@ Validation rules:
 - `selected_candidate_keys` must contain no duplicates.
 - `selected_candidate_keys` must contain at most `n` candidates.
 - Every selected candidate must have a valid nomination.
-- The voter must not already have a valid vote for the same trustee selection election.
+- Repeated votes from the same voter are handled by the conflict rule below.
 - The proof-of-work must satisfy the required difficulty for trustee vote objects.
 
-For the first implementation, the duplicate vote rule is:
+For the first implementation, revoting is not supported as a user-facing feature.
+
+If one `voter_public_key` publishes multiple valid `TrusteeVote` objects for the same `trustee_selection_id`, they form a conflict group.
 
 ```text
-first valid vote wins
+trustee_vote_conflict_key = trustee_selection_id || voter_public_key
 ```
 
-Later protocol versions may define a replacement or sequence-based revoting rule, but the initial version must remain deterministic across all nodes.
+If the conflict group contains more than one valid `TrusteeVote`, no vote from that group is included in the tally. This rule does not depend on delivery order and prevents revoting through hash grinding.
 
 ## Tally Rule
 
@@ -176,7 +182,7 @@ For the initial threshold configuration, this means:
 ```text
 3 selected trustees
 3 required consent signatures
-2 trustee shares required later for tally
+2 trustee shares required for tally
 ```
 
 ## Non-Consenting Trustees
@@ -222,13 +228,7 @@ Initial anonymous voting scheme:
 eligibility_scheme = blind_token_v1
 ```
 
-The protocol must keep the eligibility layer abstract so that later elections can use:
-
-```text
-eligibility_scheme = zk_membership_v1
-```
-
-without redesigning the P2P layer, object log, storage model, or tally pipeline.
+The eligibility layer is verified with `blind_token_v1`.
 
 ## Validation Summary
 
