@@ -15,7 +15,7 @@ LibreVote v1 защищает:
 - защиту от double voting;
 - корректность локального tally;
 - проверяемость trustee selection;
-- проверяемость blind token issuance;
+- проверяемость blind token issuance metadata и recipient-local проверку encrypted issue payload;
 - проверяемость trustee decryption shares;
 - локальные приватные ключи;
 - P2P-сеть от дешевого spam, Sybil и resource exhaustion.
@@ -42,6 +42,7 @@ LibreVote v1 требует следующие допущения:
 - `voter_allowlist` сформирован корректно.
 - Trustee selection проведен по правилам протокола.
 - Большинство voting power не выбрало заведомо сговорившихся trustees.
+- Менее `2` из `3` trustees сговорились для выпуска anonymous credentials вне публичного issuance flow.
 - Менее `2` из `3` trustees сговорились до tally phase для раскрытия выбора.
 - Минимум `2` из `3` trustees доступны в tally phase.
 - Пользовательское устройство защищает локальные секреты во время использования.
@@ -152,6 +153,7 @@ Malicious trustee атакует issuance, key setup или tally.
 - отказывается участвовать в key setup;
 - не публикует `TallyDecryptionShare`;
 - публикует invalid decryption share;
+- публикует invalid `TallyKeyContribution`;
 - пытается повлиять на tally result object.
 
 Mitigations:
@@ -159,7 +161,9 @@ Mitigations:
 - trustees выбираются публичным trustee selection;
 - все selected trustees публикуют `TrusteeConsent`;
 - `BlindTokenIssue` публично аудируется как encrypted domain object;
+- корректность encrypted blind token signature проверяется recipient voter после расшифровки;
 - conflicting `BlindTokenIssue` исключается из issuance;
+- conflicting `TallyKeyContribution` исключает trustee key setup;
 - decryption shares имеют cryptographic proof;
 - tally result проверяется локальным пересчетом;
 - result objects не являются авторитетными.
@@ -176,6 +180,8 @@ Residual risk:
 Возможности:
 
 - `2` trustees объединяют decryption shares и раскрывают encrypted choices до официальной tally phase;
+- `2` trustees расшифровывают individual public ballot ciphertexts, а не только aggregate tally;
+- `2` trustees выпускают valid blind token signatures для extra anonymous credentials вне публичного issuance flow;
 - trustees сопоставляют timing issuance requests и ballots;
 - trustees отказываются выдавать blind token signatures отдельным voters.
 
@@ -191,6 +197,12 @@ Mitigations:
 Trust assumption:
 
 - privacy выбора до tally phase сохраняется только если менее `2` trustees сговорились.
+- eligibility integrity против extra anonymous ballots сохраняется только если менее `2` trustees сговорились выпускать credentials вне протокола.
+
+Residual risk:
+
+- после threshold collusion trustees могут расшифровать individual anonymous ballot ciphertexts;
+- LibreVote v1 не использует mixnet или aggregate-only MPC, поэтому threshold trustees технически способны decrypt individual ciphertexts.
 
 ### Network Observer
 
@@ -364,7 +376,7 @@ voter публикует несколько valid ballots с одним прав
 
 Защита:
 
-- `public_ballot_conflict_key` для public ballots;
+- `trustee_vote_conflict_key` для public trustee votes;
 - `token_nullifier` для anonymous ballots;
 - конфликтная группа исключается из tally полностью.
 

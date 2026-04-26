@@ -8,6 +8,7 @@ Tally layer строит проверяемый результат из лока
 
 - Trustee selection tally является публичным и детерминированным.
 - Anonymous election tally является encrypted tally с threshold decryption.
+- Anonymous election tally использует `TallyKeySet` как activation object.
 - В tally включаются только объекты со статусом `valid_for_tally`.
 - `valid_but_conflicted`, `invalid` и `pending_dependencies` не включаются в tally.
 - Конфликтная группа повторных бюллетеней исключается полностью.
@@ -114,9 +115,9 @@ candidate_score = count(valid_for_tally votes selecting candidate)
 candidate_rank_hash = HASH("librevote-trustee-rank-v1" || candidate_public_key)
 ```
 
-Первые `3` candidates становятся selected trustees.
+Первые `3` candidates становятся initial selected trustees для UI и initial consent targeting.
 
-Если selected trustee не публикует valid `TrusteeConsent`, он заменяется следующим candidate в deterministic ranking. Финальный trustee set должен содержать `3` trustees с valid consent.
+`TrusteeSelectionResult` фиксирует preliminary `candidate_ranking[]`. Финальный trustee set для anonymous election выводится как первые `3` ranked candidates с valid non-conflicted `TrusteeConsent` для конкретного `election_id`.
 
 ## TrusteeSelectionResult Verification
 
@@ -129,7 +130,8 @@ candidate_rank_hash = HASH("librevote-trustee-rank-v1" || candidate_public_key)
 - `trustee_selection_id` существует.
 - Все referenced nominations и votes доступны или синхронизированы.
 - Локальный candidate scoring совпадает с `candidate_scores[]`.
-- Локальный selected trustee set совпадает с `selected_trustees[]`.
+- Локальный candidate ranking совпадает с `candidate_ranking[]`.
+- `initial_selected_trustees[]` совпадает с первыми `3` candidates ranking.
 - `valid_vote_count` совпадает.
 - `conflicted_vote_count` совпадает.
 - `threshold_t = 2`.
@@ -210,7 +212,7 @@ aggregated_ciphertexts[j] = sum_encrypted(
 Правила:
 
 - Все included ballots имеют одинаковый `options_count`.
-- Все ciphertexts зашифрованы под `tally_public_key` election.
+- Все ciphertexts зашифрованы под `TallyKeySet.tally_public_key` election.
 - Все included ballots прошли `choice_validity_proof`.
 - Aggregation выполняется в порядке sorted input list.
 
@@ -222,6 +224,7 @@ aggregated_ciphertexts[j] = sum_encrypted(
 encrypted_tally_hash = HASH(
   "librevote-encrypted-tally-v1" ||
   election_id ||
+  tally_key_set_hash ||
   tally_public_key ||
   sorted_valid_ballot_object_ids ||
   aggregated_ciphertexts
@@ -245,16 +248,16 @@ TallyDecryptionShare {
   encrypted_tally_hash
   decryption_share
   decryption_proof
-  created_at
   signature
 }
 ```
 
 Проверка:
 
-- `election_id` ссылается на существующий `AnonymousElection`.
-- `trustee_public_key` входит в финальный `trustee_set[]`.
-- `encrypted_tally_hash` совпадает с локально вычисленным.
+- `election_id` ссылается на operationally active `AnonymousElection`.
+- `ObjectEnvelope.created_at >= AnonymousElection.tally_starts_at` с учетом clock skew policy.
+- `trustee_public_key` входит в финальный `TallyKeySet.trustee_set[]`.
+- `encrypted_tally_hash` совпадает с локально вычисленным или share ожидает matching recompute как `pending_dependencies`.
 - `decryption_proof` валиден для `decryption_share`.
 - `signature` валидна для `trustee_public_key`.
 - Если один trustee публикует больше одного valid share для одного `encrypted_tally_hash`, вся conflict group исключается из tally decryption.
@@ -280,6 +283,7 @@ option_results[] = ThresholdDecrypt(
 
 - `len(option_results) = len(options)`.
 - Каждый result является неотрицательным целым числом.
+- Каждый result декодируется как bounded discrete log в диапазоне `[0, valid_ballot_count]`.
 - Сумма `option_results[]` равна `valid_ballot_count`.
 
 Если сумма не совпадает, tally state получает статус `invalid` и опубликованный `TallyResult` не принимается.
@@ -291,14 +295,13 @@ option_results[] = ThresholdDecrypt(
 ```text
 TallyResult {
   election_id
+  tally_key_set_hash
   encrypted_tally_hash
   decryption_share_object_ids[]
   option_results[]
   valid_ballot_count
   conflicted_ballot_count
-  invalid_ballot_count
   result_hash
-  created_at
   reporter_public_key
   signature
 }
@@ -306,14 +309,14 @@ TallyResult {
 
 Узел принимает `TallyResult` только если:
 
-- `election_id` существует.
+- `election_id` существует и указывает на operationally active `AnonymousElection`.
+- `tally_key_set_hash` совпадает с локальным валидным `TallyKeySet`.
 - `encrypted_tally_hash` совпадает с локальным.
 - `decryption_share_object_ids[]` содержит минимум `2` valid shares.
 - Все shares относятся к distinct trustees.
 - `option_results[]` совпадает с локально расшифрованным результатом.
 - `valid_ballot_count` совпадает с локальным count.
 - `conflicted_ballot_count` совпадает с локальным count.
-- `invalid_ballot_count` совпадает с локальным count.
 - `result_hash` совпадает с локально вычисленным.
 - `signature` валидна для `reporter_public_key`.
 
@@ -327,12 +330,12 @@ TallyResult {
 result_hash = HASH(
   "librevote-tally-result-v1" ||
   election_id ||
+  tally_key_set_hash ||
   encrypted_tally_hash ||
   sorted_decryption_share_object_ids ||
   option_results ||
   valid_ballot_count ||
-  conflicted_ballot_count ||
-  invalid_ballot_count
+  conflicted_ballot_count
 )
 ```
 
@@ -365,6 +368,8 @@ conflicted_ballot_count = count(AnonymousBallot where validation_status = valid_
 invalid_ballot_count = count(AnonymousBallot where validation_status = invalid)
 ```
 
+`invalid_ballot_count` является локальной диагностикой. Он не входит в `TallyResult` и `result_hash`, потому что invalid payloads не retained durably и разные узлы могут видеть разные invalid spam objects.
+
 `pending_dependencies` не входит в `invalid_ballot_count`.
 
 ## Recompute Rules
@@ -373,6 +378,7 @@ Tally layer пересчитывает state при изменении:
 
 - validation status любого ballot;
 - `TallyKeySet`;
+- `TallyKeyContribution`;
 - `TallyDecryptionShare`;
 - `TrusteeSelectionResult`;
 - `TrusteeConsent`;

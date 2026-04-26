@@ -53,10 +53,11 @@ canonical_bytes = CanonicalProtobuf(type_url, version, payload)
 
 ```text
 librevote-object-id-v1
-librevote-public-ballot-sign-v1
 librevote-trustee-nomination-sign-v1
 librevote-trustee-vote-sign-v1
 librevote-trustee-consent-sign-v1
+librevote-tally-key-contribution-sign-v1
+librevote-tally-key-set-sign-v1
 librevote-peer-admission-pow-v1
 librevote-object-pow-v1
 librevote-sync-request-pow-v1
@@ -66,6 +67,9 @@ librevote-token-holder-sign-v1
 librevote-token-nullifier-v1
 librevote-choice-encryption-v1
 librevote-tally-share-proof-v1
+librevote-election-parameters-v1
+librevote-dkg-share-encryption-v1
+librevote-tally-key-set-hash-v1
 librevote-key-encryption-v1
 ```
 
@@ -75,13 +79,31 @@ librevote-key-encryption-v1
 
 Каждый доменный объект имеет content-addressed `object_id`.
 
+`object_id` вычисляется по canonical object bytes.
+
 ```text
-object_id = HASH(
-  "librevote-object-id-v1" ||
-  object_type ||
-  canonical_payload_without_object_id_and_pow
+canonical_object_bytes = CanonicalObjectEnvelope(
+  protocol_version,
+  network_id,
+  object_type,
+  scope,
+  scope_id,
+  created_at,
+  payload_with_signatures
 )
+
+object_id = HASH("librevote-object-id-v1" || canonical_object_bytes)
 ```
+
+В `canonical_object_bytes` не входят:
+
+- `object_id`;
+- envelope `pow`;
+- source peer;
+- local validation metadata;
+- storage metadata.
+
+Domain payload не содержит PoW. PoW находится только в `ObjectEnvelope.pow`.
 
 `object_id` используется для:
 
@@ -105,7 +127,7 @@ node key
 
 voter signing key
 - Ed25519
-- используется для PublicBallot и trustee selection votes
+- используется для `TrusteeVote` и `BlindTokenRequest`
 - входит в voter allowlist
 
 voter encryption key
@@ -121,8 +143,14 @@ trustee blind-token key
 - Ristretto255 Schnorr blind-signing key
 - используется для blind_token_v1 issuance
 
+trustee tally setup key
+- Ristretto255 DKG encryption key
+- публикуется в TrusteeConsent
+- используется для verifiable encrypted DKG shares
+
 trustee tally share key
 - Ristretto255 threshold ElGamal share
+- создается локально после successful DKG contribution processing
 - используется для tally decryption shares
 
 anonymous token key
@@ -149,16 +177,26 @@ Ed25519 используется для публично проверяемых 
 
 Примеры:
 
-- `PublicBallot`;
 - `TrusteeNomination`;
 - `TrusteeVote`;
 - `TrusteeConsent`;
+- `TallyKeyContribution`;
+- `TallyKeySet`;
 - election metadata objects.
 
 Общая форма подписи:
 
 ```text
-signing_payload = HASH(domain_separator || canonical_payload_without_signature_and_pow)
+signing_payload = HASH(
+  domain_separator ||
+  protocol_version ||
+  network_id ||
+  object_type ||
+  scope ||
+  scope_id ||
+  created_at ||
+  canonical_payload_without_signature
+)
 signature = Ed25519.Sign(private_key, signing_payload)
 ```
 
@@ -191,6 +229,8 @@ sync request pow -> librevote-sync-request-pow-v1
 
 PoW не доказывает право голоса и не заменяет подписи, blind tokens, nullifiers или threshold cryptography.
 
+Для object PoW `target_hash = object_id`. Для sync request PoW `target_hash` задается canonical request body hash.
+
 ## Blind Token v1
 
 `blind_token_v1` доказывает право на анонимный бюллетень без раскрытия `voter_public_key`.
@@ -222,6 +262,29 @@ election_id || voter_public_key
 
 После unblinding избиратель получает trustee signatures, которые публично проверяются по `token_public_key`, но не связываются с исходным `voter_public_key`.
 
+### Blind Schnorr Transcript
+
+Blind token issuance использует один фиксированный transcript format.
+
+```text
+transcript = Transcript("librevote-blind-schnorr-v1")
+transcript.append("network_id", network_id)
+transcript.append("election_id", election_id)
+transcript.append("trustee_blind_token_key_id", trustee_blind_token_key_id)
+transcript.append("blinded_token_message", blinded_token_message)
+```
+
+Правила nonce и challenge:
+
+- trustee генерирует fresh Schnorr nonce для каждого issuance request;
+- nonce reuse для одного `trustee_blind_token_key` запрещен;
+- challenge выводится только из transcript bytes;
+- unblinded signature проверяется над `blind_token_message` и `token_public_key`;
+- parallel issuance не переиспользует nonce state между requests;
+- implementation должна иметь test vectors для transcript, blinding, unblinding и verification.
+
+Любой decrypted issue payload, не проходящий unblinded signature verification, не используется voter client.
+
 ## Encrypted Blind Token Issue Payload
 
 `BlindTokenIssue` публикуется в P2P-сеть с зашифрованным payload.
@@ -235,8 +298,6 @@ voter_public_key
 request_object_id
 recipient_key_id
 encrypted_payload
-created_at
-pow
 signature
 ```
 
@@ -251,6 +312,26 @@ encrypted_payload = HPKE.Seal(
 )
 ```
 
+`canonical_public_issue_header` задается как:
+
+```text
+canonical_public_issue_header = CanonicalProtobuf(BlindTokenIssueAAD {
+  protocol_version
+  network_id
+  object_type = BlindTokenIssue
+  scope = election_id
+  scope_id = election_id
+  created_at = ObjectEnvelope.created_at
+  election_id
+  trustee_public_key
+  voter_public_key
+  request_object_id
+  recipient_key_id
+})
+```
+
+В AAD не входят `object_id`, envelope `pow`, `encrypted_payload` и `signature`.
+
 Зашифрованный payload содержит:
 
 ```text
@@ -260,7 +341,7 @@ BlindTokenIssuePayload {
 }
 ```
 
-Публичные узлы проверяют подпись trustee, `request_object_id`, `recipient_key_id` и уникальность issue. Избиратель дополнительно расшифровывает payload и проверяет `blinded_token_signature`.
+Публичные узлы проверяют подпись trustee, `request_object_id`, `recipient_key_id`, issuance window и уникальность issue. Избиратель дополнительно расшифровывает payload и проверяет, что `blinded_token_signature` создан blind-token key того же trustee, который подписал public envelope.
 
 ## Anonymous Ballot Authorization
 
@@ -273,7 +354,7 @@ eligibility_proof.trustee_token_signatures[]
 token_holder_signature
 ```
 
-`eligibility_proof.trustee_token_signatures[]` должен содержать минимум `2` валидные blind token signatures от trustees из финального trustee set.
+`eligibility_proof.trustee_token_signatures[]` должен содержать минимум `2` валидные blind token signatures от distinct trustees из финального trustee set.
 
 `token_nullifier` вычисляется так:
 
@@ -287,25 +368,31 @@ token_nullifier = HASH("librevote-token-nullifier-v1" || election_id || token_pu
 token_holder_payload = HASH(
   "librevote-token-holder-sign-v1" ||
   election_id ||
-  encrypted_choice ||
-  choice_validity_proof ||
+  canonical_bytes(encrypted_choice) ||
+  canonical_bytes(choice_validity_proof) ||
+  token_public_key ||
   token_nullifier ||
-  created_at
+  canonical_bytes(eligibility_proof) ||
+  ObjectEnvelope.created_at
 )
 
 token_holder_signature = Schnorr.Sign(token_private_key, token_holder_payload)
 ```
 
+`canonical_bytes(...)` использует canonical protobuf profile. Эквивалентная implementation может подписывать canonical `AnonymousBallot` payload без `token_holder_signature` и envelope `pow`.
+
 Проверка anonymous ballot authorization:
 
 - `token_nullifier` соответствует `election_id` и `token_public_key`.
-- Минимум `2` trustee blind token signatures валидны для `blind_token_message`.
-- Подписавшие trustees входят в финальный trustee set.
+- Минимум `2` trustee blind token signatures от distinct trustees валидны для `blind_token_message`.
+- Подписавшие trustees входят в финальный trustee set из валидного `TallyKeySet`.
 - `token_holder_signature` валидна для `token_public_key`.
+
+Публичная проверка `AnonymousBallot` не доказывает, что trustees выдали signatures только через публично видимые `BlindTokenRequest`. Integrity против fraudulent extra issuance требует допущение, что менее `2` из `3` trustees сговорились выпускать credentials вне протокола.
 
 ## Threshold Tally Key
 
-Основное анонимное голосование использует threshold ElGamal key setup для выбранных trustees.
+Основное анонимное голосование использует distributed threshold ElGamal key setup для финальных trustees.
 
 Параметры v1:
 
@@ -315,25 +402,81 @@ threshold_t = 2
 group = Ristretto255
 ```
 
-Key setup публикует:
+Каждый final trustee публикует `TallyKeyContribution`:
+
+```text
+TallyKeyContribution {
+  election_id
+  trustee_public_key
+  trustee_tally_setup_public_key
+  dkg_commitments[]
+  dkg_encrypted_shares[]
+  setup_proof
+  signature
+}
+```
+
+`dkg_encrypted_shares[]` шифруются для `trustee_tally_setup_public_key` получателей из final trustee set. Public commitments, setup proofs и share encryption proofs позволяют проверить, что aggregate `tally_public_key` выводится из published contributions.
+
+DKG encrypted share AAD:
+
+```text
+dkg_share_aad = HASH(
+  "librevote-dkg-share-encryption-v1" ||
+  network_id ||
+  election_id ||
+  trustee_selection_result_hash ||
+  trustee_set_hash ||
+  sender_trustee_public_key ||
+  recipient_trustee_public_key ||
+  recipient_tally_setup_key_id ||
+  recipient_index
+)
+```
+
+`share_encryption_proof` публично привязывает encrypted share к sender commitments, recipient setup key и `dkg_share_aad`. Recipient trustee после decrypt проверяет share against commitments before storing local `trustee_tally_share`.
+
+Key setup завершается публикуемым `TallyKeySet`:
 
 ```text
 TallyKeySet {
   election_id
+  trustee_selection_result_hash
+  trustee_set[]
+  trustee_consent_object_ids[]
+  tally_key_contribution_object_ids[]
   trustee_set_hash
   threshold_t
   trustee_count_n
   tally_public_key
   trustee_key_commitments[]
   setup_proofs[]
+  tally_key_set_hash
 }
 ```
 
-Узел принимает anonymous election только если `TallyKeySet` валиден для финального trustee set и threshold `2-of-3`.
+`tally_key_set_hash`:
+
+```text
+tally_key_set_hash = HASH(
+  "librevote-tally-key-set-hash-v1" ||
+  election_id ||
+  trustee_selection_result_hash ||
+  canonical_trustee_set ||
+  sorted_trustee_consent_object_ids ||
+  sorted_tally_key_contribution_object_ids ||
+  canonical_dkg_commitments ||
+  tally_public_key
+)
+```
+
+Узел принимает anonymous election как operationally active только если `TallyKeySet` валиден для финального trustee set и threshold `2-of-3`.
+
+`TallyKeySet` не создается trusted dealer. Полный private tally key не существует как локальный secret у creator или одного trustee.
 
 ## Encrypted Choice
 
-Анонимный бюллетень шифрует выбор под `tally_public_key`.
+Анонимный бюллетень шифрует выбор под `TallyKeySet.tally_public_key`.
 
 Для single-choice голосования используется one-hot vector длиной `options_count`.
 
@@ -346,7 +489,7 @@ sum(choice_vector) = 1
 Каждый элемент vector шифруется отдельным ElGamal ciphertext:
 
 ```text
-ciphertext_j = ElGamalEncrypt(tally_public_key, choice_vector[j], randomness_j)
+ciphertext_j = ElGamalEncrypt(TallyKeySet.tally_public_key, choice_vector[j], randomness_j)
 ```
 
 `encrypted_choice` содержит массив ciphertexts длиной `options_count`.
@@ -366,7 +509,7 @@ EncryptedChoice {
 - каждый ciphertext шифрует `0` или `1`;
 - сумма зашифрованного vector равна `1`;
 - количество ciphertexts равно количеству options в election metadata;
-- все ciphertexts зашифрованы под `tally_public_key` этого election.
+- все ciphertexts зашифрованы под `TallyKeySet.tally_public_key` этого election.
 
 Бюллетень без валидного `choice_validity_proof` получает статус `invalid`.
 
@@ -389,10 +532,28 @@ TallyDecryptionShare {
 
 - `trustee_public_key` входит в финальный trustee set.
 - Подпись trustee валидна.
+- `ObjectEnvelope.created_at >= tally_starts_at` с учетом clock skew policy.
 - `encrypted_tally_hash` соответствует локально вычисленному encrypted tally.
 - `decryption_proof` валиден для `decryption_share`.
 
-Результат раскрывается при наличии минимум `2` валидных decryption shares.
+Результат раскрывается при наличии минимум `2` валидных decryption shares от distinct trustees.
+
+Threshold decryption раскрывает aggregate ciphertexts. Если `2` trustees сговариваются, они технически могут расшифровать individual ballot ciphertexts, потому что anonymous ballots публичны. Это является явным privacy limitation v1.
+
+## Tally Count Decoding
+
+После threshold decryption каждый option result декодируется как bounded discrete log в малом диапазоне.
+
+```text
+decoded_count_j = DecodePointAsCount(point_j, 0..valid_ballot_count)
+```
+
+Правила:
+
+- допустимый диапазон декодирования равен `[0, valid_ballot_count]`;
+- если point не соответствует ни одному count в диапазоне, tally verification fails;
+- сумма decoded counts должна равняться `valid_ballot_count`;
+- implementations используют deterministic bounded search или precomputed table для диапазона election.
 
 ## Randomness
 
@@ -404,6 +565,8 @@ TallyDecryptionShare {
 - voter key generation;
 - voter encryption key generation;
 - trustee key generation;
+- DKG polynomial randomness;
+- DKG share encryption randomness;
 - anonymous token key generation;
 - blind token blinding factors;
 - HPKE ephemeral keys;
@@ -446,6 +609,8 @@ encrypted_private_key = XChaCha20Poly1305.Seal(
 ```
 
 `salt`, `nonce`, `memory`, `iterations` и `parallelism` хранятся в `encryption_metadata` локального `KeyRecord`.
+
+Та же схема local secret encryption используется для `blinding_factor` и локально сохраненных unblinded token signatures в issuance state.
 
 ## Verification Boundary
 

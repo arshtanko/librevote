@@ -6,8 +6,8 @@
 
 ## Принятые Решения
 
-- В v1 используются два типа бюллетеней: `PublicBallot` и `AnonymousBallot`.
-- `PublicBallot` используется для неанонимных голосований, включая выбор trustees.
+- В v1 используются `TrusteeVote` для публичного выбора trustees и `AnonymousBallot` для основного голосования.
+- Отдельный object type `PublicBallot` в v1 отсутствует.
 - `AnonymousBallot` используется для основного анонимного голосования.
 - Анонимное голосование v1 использует `blind_token_v1` для проверки права голоса.
 - Анонимный бюллетень не содержит `voter_public_key`, `peer_id` или `node_public_key`.
@@ -49,7 +49,7 @@ ballot -> election_id
 object_id
 - сетевой content-addressed identifier
 - используется object log и sync layer
-- вычисляется по каноническому payload объекта без `object_id` и `pow`
+- вычисляется по canonical object bytes из `ObjectEnvelope` без `object_id` и envelope `pow`
 
 ballot_conflict_key
 - доменный ключ права голоса в рамках election_id
@@ -68,19 +68,17 @@ valid conflict group size = 1 -> include ballot in tally
 valid conflict group size > 1 -> include no ballots from this group
 ```
 
-## PublicBallot
+## TrusteeVote
 
-`PublicBallot` используется там, где личность голосующего публична.
+`TrusteeVote` используется там, где личность голосующего публична.
 
 Пример: голосование за trustees.
 
 ```text
-PublicBallot {
-  election_id
+TrusteeVote {
+  trustee_selection_id
   voter_public_key
-  choices[]
-  created_at
-  pow
+  selected_candidate_keys[]
   signature
 }
 ```
@@ -88,31 +86,31 @@ PublicBallot {
 Подпись создается ключом `voter_public_key` поверх канонического тела бюллетеня.
 
 ```text
-public_ballot_signing_payload = HASH(
-  "librevote-public-ballot-sign-v1" ||
-  election_id ||
+trustee_vote_signing_payload = HASH(
+  "librevote-trustee-vote-sign-v1" ||
+  trustee_selection_id ||
   voter_public_key ||
-  choices ||
-  created_at
+  selected_candidate_keys ||
+  ObjectEnvelope.created_at
 )
 ```
 
 Правила валидации:
 
-- `election_id` ссылается на существующее публичное или trustee-selection голосование.
+- `trustee_selection_id` ссылается на существующее trustee-selection голосование.
 - `voter_public_key` входит в allowlist голосования.
 - `signature` валидна для `voter_public_key`.
-- `choices[]` соответствует правилам голосования.
-- `created_at` находится внутри voting window.
-- `pow` валиден для `PublicBallot`.
+- `selected_candidate_keys[]` соответствует правилам trustee selection.
+- `ObjectEnvelope.created_at` находится внутри voting window.
+- envelope `pow` валиден для `TrusteeVote`.
 
 Конфликтный ключ публичного бюллетеня:
 
 ```text
-public_ballot_conflict_key = election_id || voter_public_key
+trustee_vote_conflict_key = trustee_selection_id || voter_public_key
 ```
 
-Если один `voter_public_key` публикует несколько валидных `PublicBallot` для одного `election_id`, они образуют конфликтную группу. Ни один бюллетень из такой группы не включается в tally.
+Если один `voter_public_key` публикует несколько валидных `TrusteeVote` для одного `trustee_selection_id`, они образуют конфликтную группу. Ни один vote из такой группы не включается в trustee selection tally.
 
 ## AnonymousBallot
 
@@ -127,8 +125,6 @@ AnonymousBallot {
   token_nullifier
   eligibility_proof
   token_holder_signature
-  created_at
-  pow
 }
 ```
 
@@ -141,14 +137,14 @@ AnonymousBallot {
 - `election_id` ссылается на существующее анонимное голосование.
 - Голосование использует `blind_token_v1`.
 - `eligibility_proof` валиден для trustee set этого голосования.
-- `eligibility_proof` содержит достаточное подтверждение `2-of-3` trustees.
+- `eligibility_proof` содержит достаточное подтверждение `2-of-3` distinct trustees.
 - `token_holder_signature` валидна для `token_public_key`.
 - `token_nullifier` корректно связан с `token_public_key`.
 - `token_nullifier` относится к данному `election_id`.
 - `encrypted_choice` зашифрован под `tally_public_key` этого голосования.
 - `choice_validity_proof` доказывает, что `encrypted_choice` кодирует допустимый выбор.
-- `created_at` находится внутри voting window.
-- `pow` валиден для `AnonymousBallot`.
+- `ObjectEnvelope.created_at` находится внутри voting window.
+- envelope `pow` валиден для `AnonymousBallot`.
 
 Конфликтный ключ анонимного бюллетеня:
 
@@ -173,8 +169,8 @@ eligibility_proof {
 Проверка:
 
 - Blind token signatures проверяются поверх `election_id` и `token_public_key`.
-- `trustee_token_signatures[]` содержит минимум `threshold_t = 2` валидные blind token signatures trustees.
-- Подписавшие trustees входят в финальный trustee set голосования.
+- `trustee_token_signatures[]` содержит минимум `threshold_t = 2` валидные blind token signatures от distinct trustees.
+- Подписавшие trustees входят в финальный trustee set из валидного `TallyKeySet`.
 - `token_nullifier` вычислен из `token_public_key` и `election_id` по каноническому правилу.
 - `token_holder_signature` доказывает владение приватным token key.
 
@@ -207,7 +203,7 @@ encrypted_choice {
 
 ## Хранение Конфликтов
 
-Узел хранит все полученные объекты в object log после сетевой проверки.
+Узел сохраняет payload как retained pending object после дешевых envelope checks и присваивает доменный статус после validation pipeline.
 
 Доменная модель различает статусы:
 
@@ -234,8 +230,8 @@ pending_dependencies
 2. Check object_id.
 3. Check object type.
 4. Check election existence.
-5. Check voting window.
-6. Check PoW.
+5. Check voting window using `ObjectEnvelope.created_at`.
+6. Check envelope PoW.
 7. Check ballot-specific cryptographic proof.
 8. Check choice validity.
 9. Compute conflict key.
@@ -250,6 +246,6 @@ pending_dependencies
 
 В tally включаются только бюллетени со статусом `valid_for_tally`.
 
-Для `PublicBallot` tally использует открытый `choices[]`.
+Для `TrusteeVote` trustee-selection tally использует открытый `selected_candidate_keys[]`.
 
 Для `AnonymousBallot` tally использует `encrypted_choice`. Расшифровка результата выполняется в tally phase с участием trustees. Бюллетень считается включенным в tally до расшифровки, если его encrypted choice и eligibility proof валидны.

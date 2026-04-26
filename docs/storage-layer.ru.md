@@ -17,7 +17,8 @@ Storage layer хранит доменные объекты, результаты
 - Quarantine для невалидных объектов не используется.
 - Invalid payloads не хранятся долговременно.
 - Валидные и conflicted payloads хранятся бессрочно в v1.
-- Pending payloads хранятся до финального validation status.
+- Pending payloads хранятся до финального validation status или до mandatory pending retention limit.
+- Invalid payload не revalidatable без повторного получения payload из сети.
 - Source peer хранится только как локальная сетевая metadata и не входит в доменную модель.
 
 ## Граница Слоя
@@ -31,6 +32,7 @@ Storage layer отвечает за:
 - хранение dependencies для pending объектов;
 - хранение derived state;
 - хранение encrypted local keys;
+- хранение encrypted local issuance secrets;
 - хранение peer и sync metadata.
 
 Storage layer не отвечает за:
@@ -54,6 +56,22 @@ busy_timeout = configured value
 ```
 
 Все записи, меняющие object log, validation records или derived state, выполняются внутри транзакций.
+
+## Process Lock
+
+Перед открытием SQLite для mutating access node или offline CLI берет single-instance lock.
+
+```text
+lock_path = <data_dir>/librevote.lock
+```
+
+Правила:
+
+- running node удерживает lock до shutdown;
+- offline mutating CLI commands получают lock перед открытием базы;
+- если lock удерживается живым process, offline mutating command завершается ошибкой;
+- stale lock проверяется по PID и socket ownership;
+- stale lock удаляется только если PID не существует и Unix socket не принадлежит running node.
 
 ## Schema Metadata
 
@@ -103,6 +121,7 @@ objects {
 - `payload_hash` вычисляется по retained payload bytes.
 - `payload_retained = true` означает, что payload доступен в `object_payloads`.
 - Повторное получение известного `object_id` обновляет только `last_seen_at` и сетевую metadata.
+- Для `validation_status = pending_payload_evicted` повторное получение того же `object_id` с matching payload hash заново сохраняет payload и переводит объект в validation queue.
 - Payload mismatch для известного `object_id` отклоняется.
 - `scope_id` содержит `election_id`, `trustee_selection_id` или пустое значение для `scope = network`.
 
@@ -130,7 +149,8 @@ object_payloads {
 - `payload_bytes` immutable после вставки.
 - Для `payload_retained = true` запись в `object_payloads` обязательна.
 - Для `payload_retained = false` запись в `object_payloads` отсутствует.
-- `GetObject` и `GetObjects` возвращают только объекты с `payload_retained = true`.
+- `GetObject` и `GetObjects` возвращают retained payload только для статусов `valid`, `valid_for_tally` и `valid_but_conflicted`.
+- `pending_dependencies` payload не advertised и не served; direct response использует `pending_not_served`.
 
 ## Validation Records
 
@@ -151,6 +171,7 @@ validation_records {
 
 ```text
 pending_dependencies
+pending_payload_evicted
 valid
 valid_for_tally
 valid_but_conflicted
@@ -161,6 +182,7 @@ invalid
 
 - `validator_version` фиксирует версию правил валидации.
 - `invalid` объекты не возвращаются через sync APIs.
+- `pending_payload_evicted` не возвращается через sync APIs, но может быть reacquired from peers.
 - `invalid` объекты не перепубликовываются.
 - Для `invalid` объектов payload не хранится долговременно.
 - Подробные ошибки используются только локально и не отправляются как protocol validation trace.
@@ -221,6 +243,8 @@ invalid_object_records {
   object_id primary key
   object_type
   network_id
+  scope
+  scope_id
   first_seen_at
   last_seen_at
   seen_count
@@ -232,6 +256,7 @@ invalid_object_records {
 
 - `payload_bytes` для invalid объекта не сохраняется.
 - Повторное получение invalid `object_id` обновляет `last_seen_at` и `seen_count`.
+- `scope` и `scope_id` используются только для локальной диагностики и rate limits.
 - Invalid object metadata используется для duplicate suppression, peer scoring и локальной диагностики.
 - Invalid object metadata не является доменным объектом.
 
@@ -240,15 +265,16 @@ invalid_object_records {
 Прием объекта выполняется атомарно.
 
 ```text
-1. Begin transaction.
-2. Check existing object_id.
-3. Insert or update objects metadata.
-4. Insert payload into object_payloads when retained.
-5. Write validation_records.
-6. Write object_dependencies for pending objects.
-7. Drop payload for invalid objects.
-8. Update derived state.
-9. Commit transaction.
+1. Run cheap envelope checks before transaction.
+2. Begin transaction.
+3. Check existing object_id.
+4. Insert or update objects metadata.
+5. Insert payload into object_payloads when payload is retained.
+6. Write validation_records.
+7. Write object_dependencies for pending objects.
+8. Drop payload for invalid objects.
+9. Update derived state.
+10. Commit transaction.
 ```
 
 Правила:
@@ -258,6 +284,8 @@ invalid_object_records {
 - Нельзя обновить derived state до сохранения object metadata и validation record.
 - Если объект признан invalid в той же транзакции, payload не остается в `object_payloads`.
 - Если pending объект при повторной проверке становится invalid, его payload удаляется, а `payload_retained` становится `false`.
+- Downloaded object с missing dependencies сохраняется как `pending_dependencies` с retained payload, если pending retention budget не превышен.
+- Downloaded object с invalid envelope не сохраняется как domain object.
 
 ## Derived State
 
@@ -276,10 +304,10 @@ election_state {
 
 trustee_selection_state {
   trustee_selection_id primary key
-  selected_trustees_hash
+  candidate_ranking_hash
+  initial_selected_trustees_hash
   valid_vote_count
   conflicted_vote_count
-  consent_count
   updated_at
 }
 
@@ -288,7 +316,7 @@ tally_state {
   encrypted_tally_hash
   valid_ballot_count
   conflicted_ballot_count
-  invalid_ballot_count
+  invalid_ballot_count_diagnostic
   result_status
   result_hash
   updated_at
@@ -301,6 +329,7 @@ tally_state {
 - Derived state не используется как единственный источник результата.
 - Поврежденный derived state удаляется и строится заново из object log.
 - `TallyResult` и `TrusteeSelectionResult` проверяются локальным пересчетом, а не доверием к cached state.
+- `invalid_ballot_count_diagnostic` не входит в authoritative `TallyResult.result_hash`.
 
 ## Key Store
 
@@ -325,6 +354,7 @@ voter_signing
 voter_encryption
 trustee_signing
 trustee_blind_token
+trustee_tally_setup
 trustee_tally_share
 anonymous_token
 ```
@@ -336,6 +366,31 @@ anonymous_token
 - Passphrase не хранится.
 - Raw secrets не логируются.
 - Удаление ключа делает невозможным новые подписи, новые decrypt operations и новые proof generation операции для этого ключа.
+
+## Local Issuance State
+
+Local issuance state хранит секреты и промежуточные данные, нужные voter для выпуска `AnonymousBallot` после получения blind token signatures.
+
+```text
+local_issuance_state {
+  election_id
+  voter_key_id
+  token_key_id
+  encrypted_blinding_factor
+  encrypted_unblinded_token_signatures
+  completed_at
+  updated_at
+}
+```
+
+Правила:
+
+- `encrypted_blinding_factor` хранится encrypted-at-rest.
+- `encrypted_unblinded_token_signatures` хранится encrypted-at-rest до публикации `AnonymousBallot`.
+- `token_key_id` ссылается на local key store record с `key_type = anonymous_token`.
+- `local_issuance_state` не является доменным объектом.
+- `local_issuance_state` не синхронизируется по P2P.
+- Удаление записи делает невозможным завершить issuance для связанного local token material.
 
 ## Peer Records
 
@@ -429,11 +484,22 @@ Retention v1:
 valid payloads -> retained indefinitely
 valid_for_tally payloads -> retained indefinitely
 valid_but_conflicted payloads -> retained indefinitely
-pending_dependencies payloads -> retained until final validation status
+pending_dependencies payloads -> retained until final validation status or pending retention limit
+pending_payload_evicted payloads -> not retained, reacquire allowed
 invalid payloads -> not retained durably
 ```
 
 Для завершенных голосований валидные и conflicted объекты остаются в локальном хранилище бессрочно.
+
+Mandatory pending retention limits:
+
+```text
+max_pending_payload_bytes
+max_pending_objects_per_scope
+max_pending_age
+```
+
+Если pending object превышает retention limit, payload удаляется, `payload_retained = false`, а validation record получает `pending_payload_evicted`. Такой объект восстанавливается повторным получением payload через sync; duplicate suppression не блокирует reacquire для этого статуса.
 
 ## Rebuild Rules
 
@@ -451,3 +517,5 @@ Rebuild выполняет:
 ```
 
 Object payloads не изменяются во время rebuild.
+
+Invalid objects без retained payload не revalidated during rebuild. Если новая validator version исправляет false-invalid, узел должен получить payload повторно через sync.
