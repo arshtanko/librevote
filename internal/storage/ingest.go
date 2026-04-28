@@ -499,10 +499,10 @@ func validateIngestInput(input IngestObjectInput) error {
 	if input.ObjectID == "" {
 		return errors.New("object_id is required")
 	}
-	if input.ObjectType == "" {
+	if input.ObjectType == "" && input.ValidationStatus != domain.ValidationStatusInvalid {
 		return errors.New("object_type is required")
 	}
-	if input.NetworkID == "" {
+	if input.NetworkID == "" && input.ValidationStatus != domain.ValidationStatusInvalid {
 		return errors.New("network_id is required")
 	}
 	if input.ValidatorVersion == "" {
