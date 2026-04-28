@@ -436,10 +436,13 @@ func (s *Store) Payload(ctx context.Context, objectID string) ([]byte, error) {
 	return cloneBytes(payload), nil
 }
 
-// Dependencies reads all dependencies for an object.
+// Dependencies reads all persisted validation dependency rows for an object.
 func (s *Store) Dependencies(ctx context.Context, objectID string) ([]Dependency, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT dependency_type, dependency_id FROM object_dependencies WHERE object_id = ?",
+		`SELECT dependency_type, dependency_id
+		 FROM object_dependencies
+		 WHERE object_id = ?
+		 ORDER BY dependency_type, dependency_id`,
 		objectID)
 	if err != nil {
 		return nil, fmt.Errorf("query dependencies: %w", err)
@@ -458,6 +461,38 @@ func (s *Store) Dependencies(ctx context.Context, objectID string) ([]Dependency
 		return nil, fmt.Errorf("iterate dependencies: %w", err)
 	}
 	return deps, nil
+}
+
+// ObjectsWaitingOnDependency lists objects with persisted validation dependency
+// rows matching the dependency. Returned object ids are deterministic and unique.
+func (s *Store) ObjectsWaitingOnDependency(ctx context.Context, dependency Dependency) ([]string, error) {
+	if dependency.Type == "" || dependency.ID == "" {
+		return nil, errors.New("dependency type and id are required")
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT object_id
+		 FROM object_dependencies
+		 WHERE dependency_type = ? AND dependency_id = ?
+		 ORDER BY object_id`,
+		dependency.Type, dependency.ID)
+	if err != nil {
+		return nil, fmt.Errorf("query waiting objects: %w", err)
+	}
+	defer rows.Close()
+
+	var objectIDs []string
+	for rows.Next() {
+		var objectID string
+		if err := rows.Scan(&objectID); err != nil {
+			return nil, fmt.Errorf("scan waiting object: %w", err)
+		}
+		objectIDs = append(objectIDs, objectID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate waiting objects: %w", err)
+	}
+	return objectIDs, nil
 }
 
 func validateIngestInput(input IngestObjectInput) error {
