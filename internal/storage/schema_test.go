@@ -371,6 +371,7 @@ func TestDocumentedIndexesExist(t *testing.T) {
 		"idx_validation_version",
 		"idx_dependencies_type_id",
 		"idx_dependencies_object",
+		"idx_local_issuance_state_identity",
 	}
 
 	rows, err := store.db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'")
@@ -423,6 +424,7 @@ func TestDocumentedIndexColumnOrder(t *testing.T) {
 		{"idx_validation_version", []string{"validator_version"}},
 		{"idx_dependencies_type_id", []string{"dependency_type", "dependency_id"}},
 		{"idx_dependencies_object", []string{"object_id"}},
+		{"idx_local_issuance_state_identity", []string{"election_id", "voter_key_id"}},
 	}
 
 	for _, want := range wantIndexes {

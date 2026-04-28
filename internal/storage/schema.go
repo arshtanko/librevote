@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS local_issuance_state (
 	updated_at INTEGER NOT NULL
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_local_issuance_state_identity ON local_issuance_state(election_id, voter_key_id);
+
 CREATE TABLE IF NOT EXISTS peers (
 	peer_id TEXT NOT NULL PRIMARY KEY,
 	score REAL NOT NULL,
