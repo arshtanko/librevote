@@ -395,6 +395,8 @@ func (s *Store) ObjectMetadata(ctx context.Context, objectID string) (ObjectMeta
 		}
 		return m, fmt.Errorf("read object metadata: %w", err)
 	}
+	m.ObjectPoW = cloneBytes(m.ObjectPoW)
+	m.PayloadHash = cloneBytes(m.PayloadHash)
 	m.PayloadRetained = payloadRetained == 1
 	return m, nil
 }
@@ -431,7 +433,7 @@ func (s *Store) Payload(ctx context.Context, objectID string) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("read payload: %w", err)
 	}
-	return payload, nil
+	return cloneBytes(payload), nil
 }
 
 // Dependencies reads all dependencies for an object.
