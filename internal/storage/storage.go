@@ -214,7 +214,7 @@ func applyPragmas(db *sql.DB, busyTimeout time.Duration) error {
 
 func (s *Store) bootstrap(ctx context.Context, networkID string) error {
 	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_metadata (
-		key TEXT PRIMARY KEY,
+		key TEXT NOT NULL PRIMARY KEY,
 		value TEXT NOT NULL
 	)`); err != nil {
 		return fmt.Errorf("create schema metadata: %w", err)
@@ -232,18 +232,24 @@ func (s *Store) bootstrap(ctx context.Context, networkID string) error {
 			"created_at":     now,
 			"updated_at":     now,
 		}
-		return writeInitialMetadata(ctx, s.db, entries)
+		if err := writeInitialMetadata(ctx, s.db, entries); err != nil {
+			return err
+		}
+	} else {
+		metadata, err := parseMetadata(values)
+		if err != nil {
+			return err
+		}
+		if metadata.SchemaVersion != currentSchemaVersion {
+			return fmt.Errorf("unsupported schema version: stored %q current %q", metadata.SchemaVersion, currentSchemaVersion)
+		}
+		if metadata.NetworkID != networkID {
+			return fmt.Errorf("network id mismatch: stored %q requested %q", metadata.NetworkID, networkID)
+		}
 	}
 
-	metadata, err := parseMetadata(values)
-	if err != nil {
-		return err
-	}
-	if metadata.SchemaVersion != currentSchemaVersion {
-		return fmt.Errorf("unsupported schema version: stored %q current %q", metadata.SchemaVersion, currentSchemaVersion)
-	}
-	if metadata.NetworkID != networkID {
-		return fmt.Errorf("network id mismatch: stored %q requested %q", metadata.NetworkID, networkID)
+	if err := s.bootstrapSchema(ctx); err != nil {
+		return fmt.Errorf("bootstrap schema: %w", err)
 	}
 	return nil
 }
