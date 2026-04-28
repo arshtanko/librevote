@@ -32,9 +32,6 @@ func (s *Store) PersistEnvelopeValidationOutcome(ctx context.Context, envelope d
 	if outcome.AffectedScope.Scope != "" || outcome.AffectedScope.ScopeID != "" {
 		return validation.PersistenceResult{}, errors.New("affected scope is not supported by envelope persistence")
 	}
-	if outcome.ShouldRepublish {
-		return validation.PersistenceResult{}, errors.New("republish flag is not supported by envelope persistence")
-	}
 	if outcome.ShouldRecomputeState {
 		return validation.PersistenceResult{}, errors.New("recompute flag is not supported by envelope persistence")
 	}

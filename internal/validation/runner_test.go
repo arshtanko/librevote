@@ -262,6 +262,126 @@ func TestRunnerDoesNotEmitNetworkTallyOrRevalidationSideEffects(t *testing.T) {
 	}
 }
 
+func TestRunnerIntegratesStructuralValidatorAndContextualDelegate(t *testing.T) {
+	envelope := runnerValidEnvelope(t)
+	contextual := &runnerContextualValidator{
+		outcome: validation.NewOutcome(envelope.ObjectID, validation.StatusValid),
+	}
+	structural, err := validation.NewStructuralValidator(contextual)
+	if err != nil {
+		t.Fatalf("NewStructuralValidator() error = %v", err)
+	}
+	store := &capturingStore{}
+	runner, err := validation.NewRunner(validation.RunnerConfig{
+		Envelope:         runnerEnvelopeConfig(),
+		Store:            store,
+		DomainValidator:  structural,
+		ValidatorVersion: validation.ValidatorVersionEnvelopeRunner,
+		Now:              func() time.Time { return time.UnixMilli(1700000001000) },
+	})
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+
+	result, err := runner.IngestAndValidate(context.Background(), envelope)
+	if err != nil {
+		t.Fatalf("IngestAndValidate() error = %v", err)
+	}
+	if !result.EnvelopeAccepted || !contextual.called || contextual.envelope.ObjectID != envelope.ObjectID {
+		t.Fatalf("runner did not pass accepted envelope through structural/contextual validation")
+	}
+	if result.Outcome.Status != validation.StatusValid || !result.Outcome.ShouldRepublish {
+		t.Fatalf("outcome = %+v, want delegated valid outcome", result.Outcome)
+	}
+	if store.outcome.Status != validation.StatusValid {
+		t.Fatalf("persisted outcome = %+v, want delegated valid outcome", store.outcome)
+	}
+}
+
+func TestRunnerWithStructuralValidatorDoesNotMarkValidWithoutContextualStatus(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	envelope := runnerValidEnvelope(t)
+	contextual := &runnerContextualValidator{
+		outcome: validation.NewOutcome(envelope.ObjectID, validation.StatusPendingDependencies),
+	}
+	contextual.outcome.Dependencies = []validation.Dependency{{Type: "TrusteeSelectionResult", ID: "result-1"}}
+	structural, err := validation.NewStructuralValidator(contextual)
+	if err != nil {
+		t.Fatalf("NewStructuralValidator() error = %v", err)
+	}
+	runner, err := validation.NewRunner(validation.RunnerConfig{
+		Envelope:         runnerEnvelopeConfig(),
+		Store:            store,
+		DomainValidator:  structural,
+		ValidatorVersion: validation.ValidatorVersionEnvelopeRunner,
+		Now:              func() time.Time { return time.UnixMilli(1700000001000) },
+	})
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+
+	result, err := runner.IngestAndValidate(ctx, envelope)
+	if err != nil {
+		t.Fatalf("IngestAndValidate() error = %v", err)
+	}
+	if result.Outcome.Status != validation.StatusPendingDependencies || result.Outcome.ShouldRepublish {
+		t.Fatalf("outcome = %+v, want pending without republish", result.Outcome)
+	}
+	record, err := store.ValidationRecord(ctx, envelope.ObjectID)
+	if err != nil {
+		t.Fatalf("ValidationRecord() error = %v", err)
+	}
+	if record.ValidationStatus != string(validation.StatusPendingDependencies) {
+		t.Fatalf("validation status = %q, want pending", record.ValidationStatus)
+	}
+}
+
+func TestRunnerWithStructuralValidatorPersistsDelegatedValidOutcome(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	envelope := runnerValidEnvelope(t)
+	contextual := &runnerContextualValidator{
+		outcome: validation.NewOutcome(envelope.ObjectID, validation.StatusValid),
+	}
+	structural, err := validation.NewStructuralValidator(contextual)
+	if err != nil {
+		t.Fatalf("NewStructuralValidator() error = %v", err)
+	}
+	runner, err := validation.NewRunner(validation.RunnerConfig{
+		Envelope:         runnerEnvelopeConfig(),
+		Store:            store,
+		DomainValidator:  structural,
+		ValidatorVersion: validation.ValidatorVersionEnvelopeRunner,
+		Now:              func() time.Time { return time.UnixMilli(1700000001000) },
+	})
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+
+	result, err := runner.IngestAndValidate(ctx, envelope)
+	if err != nil {
+		t.Fatalf("IngestAndValidate() error = %v", err)
+	}
+	if result.Outcome.Status != validation.StatusValid || !result.Outcome.ShouldRepublish {
+		t.Fatalf("outcome = %+v, want delegated valid republish-eligible outcome", result.Outcome)
+	}
+	record, err := store.ValidationRecord(ctx, envelope.ObjectID)
+	if err != nil {
+		t.Fatalf("ValidationRecord() error = %v", err)
+	}
+	if record.ValidationStatus != string(validation.StatusValid) {
+		t.Fatalf("validation status = %q, want valid", record.ValidationStatus)
+	}
+	deps, err := store.Dependencies(ctx, envelope.ObjectID)
+	if err != nil {
+		t.Fatalf("Dependencies() error = %v", err)
+	}
+	if len(deps) != 0 {
+		t.Fatalf("dependencies = %+v, want none for valid outcome", deps)
+	}
+}
+
 func TestRunnerRejectsUnsupportedPersistenceFlags(t *testing.T) {
 	store := openTestStore(t)
 	envelope := runnerValidEnvelope(t)
@@ -272,7 +392,6 @@ func TestRunnerRejectsUnsupportedPersistenceFlags(t *testing.T) {
 			ObjectID:             envelope.ObjectID,
 			Status:               validation.StatusPendingDependencies,
 			Dependencies:         []validation.Dependency{{Type: "election", ID: "election-1"}},
-			ShouldRepublish:      true,
 			ConflictKeys:         []validation.ConflictKey{{Group: "g", Key: "k"}},
 			AffectedScope:        validation.AffectedScope{Scope: domain.ScopeElectionID, ScopeID: "election-1"},
 			ShouldRecomputeState: true,
@@ -328,6 +447,18 @@ type staticDomainValidator struct {
 }
 
 func (v staticDomainValidator) ValidateDomain(context.Context, domain.ObjectEnvelope) (validation.Outcome, error) {
+	return v.outcome, nil
+}
+
+type runnerContextualValidator struct {
+	called   bool
+	envelope domain.ObjectEnvelope
+	outcome  validation.Outcome
+}
+
+func (v *runnerContextualValidator) ValidateContext(_ context.Context, envelope domain.ObjectEnvelope) (validation.Outcome, error) {
+	v.called = true
+	v.envelope = envelope
 	return v.outcome, nil
 }
 
