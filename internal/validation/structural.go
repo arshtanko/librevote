@@ -70,21 +70,29 @@ func (v *StructuralValidator) ValidateDomain(ctx context.Context, envelope domai
 
 func defaultStructuralChecks() map[domain.ObjectType]structuralCheck {
 	check := validateCanonicalPayloadWire
+	typed := validateTypedPayloadShape
 	return map[domain.ObjectType]structuralCheck{
-		domain.ObjectTypeTrusteeSelectionElection: check,
+		domain.ObjectTypeTrusteeSelectionElection: typed,
 		domain.ObjectTypeTrusteeNomination:        check,
 		domain.ObjectTypeTrusteeVote:              check,
-		domain.ObjectTypeTrusteeSelectionResult:   check,
-		domain.ObjectTypeTrusteeConsent:           check,
-		domain.ObjectTypeAnonymousElection:        check,
+		domain.ObjectTypeTrusteeSelectionResult:   typed,
+		domain.ObjectTypeTrusteeConsent:           typed,
+		domain.ObjectTypeAnonymousElection:        typed,
 		domain.ObjectTypeTallyKeyContribution:     check,
-		domain.ObjectTypeTallyKeySet:              check,
+		domain.ObjectTypeTallyKeySet:              typed,
 		domain.ObjectTypeBlindTokenRequest:        check,
 		domain.ObjectTypeBlindTokenIssue:          check,
 		domain.ObjectTypeAnonymousBallot:          check,
 		domain.ObjectTypeTallyDecryptionShare:     check,
 		domain.ObjectTypeTallyResult:              check,
 	}
+}
+
+func validateTypedPayloadShape(envelope domain.ObjectEnvelope) error {
+	if err := domain.ValidatePayloadShape(envelope.ObjectType, envelope.Payload); err != nil {
+		return fmt.Errorf("payload shape: %w", err)
+	}
+	return nil
 }
 
 func validateCanonicalPayloadWire(envelope domain.ObjectEnvelope) error {

@@ -264,6 +264,10 @@ func TestRunnerDoesNotEmitNetworkTallyOrRevalidationSideEffects(t *testing.T) {
 
 func TestRunnerIntegratesStructuralValidatorAndContextualDelegate(t *testing.T) {
 	envelope := runnerValidEnvelope(t)
+	envelope.ObjectType = domain.ObjectTypeBlindTokenIssue
+	envelope.Scope = domain.ScopeElectionID
+	envelope.ScopeID = "election-1"
+	envelope.ObjectID = runnerObjectIDForEnvelope(t, envelope)
 	contextual := &runnerContextualValidator{
 		outcome: validation.NewOutcome(envelope.ObjectID, validation.StatusValid),
 	}
@@ -302,6 +306,10 @@ func TestRunnerWithStructuralValidatorDoesNotMarkValidWithoutContextualStatus(t 
 	ctx := context.Background()
 	store := openTestStore(t)
 	envelope := runnerValidEnvelope(t)
+	envelope.ObjectType = domain.ObjectTypeBlindTokenIssue
+	envelope.Scope = domain.ScopeElectionID
+	envelope.ScopeID = "election-1"
+	envelope.ObjectID = runnerObjectIDForEnvelope(t, envelope)
 	contextual := &runnerContextualValidator{
 		outcome: validation.NewOutcome(envelope.ObjectID, validation.StatusPendingDependencies),
 	}
@@ -341,6 +349,10 @@ func TestRunnerWithStructuralValidatorPersistsDelegatedValidOutcome(t *testing.T
 	ctx := context.Background()
 	store := openTestStore(t)
 	envelope := runnerValidEnvelope(t)
+	envelope.ObjectType = domain.ObjectTypeBlindTokenIssue
+	envelope.Scope = domain.ScopeElectionID
+	envelope.ScopeID = "election-1"
+	envelope.ObjectID = runnerObjectIDForEnvelope(t, envelope)
 	contextual := &runnerContextualValidator{
 		outcome: validation.NewOutcome(envelope.ObjectID, validation.StatusValid),
 	}

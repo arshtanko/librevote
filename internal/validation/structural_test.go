@@ -17,6 +17,9 @@ func TestNewStructuralValidatorRequiresContextualValidator(t *testing.T) {
 
 func TestStructuralValidatorDelegatesAfterStructuralSuccess(t *testing.T) {
 	envelope := validEnvelope(t)
+	envelope.ObjectType = domain.ObjectTypeBlindTokenIssue
+	envelope.Scope = domain.ScopeElectionID
+	envelope.ScopeID = "election-1"
 	delegate := &recordingContextualValidator{
 		outcome: NewOutcome(envelope.ObjectID, StatusValid),
 	}
@@ -39,6 +42,9 @@ func TestStructuralValidatorDelegatesAfterStructuralSuccess(t *testing.T) {
 
 func TestStructuralValidatorRejectsMalformedPayloadBeforeContextualDelegation(t *testing.T) {
 	envelope := validEnvelope(t)
+	envelope.ObjectType = domain.ObjectTypeBlindTokenIssue
+	envelope.Scope = domain.ScopeElectionID
+	envelope.ScopeID = "election-1"
 	envelope.Payload = []byte("not-protobuf")
 	delegate := &recordingContextualValidator{}
 	validator, err := NewStructuralValidator(delegate)
@@ -81,6 +87,9 @@ func TestStructuralValidatorRejectsUnsupportedObjectType(t *testing.T) {
 
 func TestStructuralValidatorDoesNotInventDependencies(t *testing.T) {
 	envelope := validEnvelope(t)
+	envelope.ObjectType = domain.ObjectTypeBlindTokenIssue
+	envelope.Scope = domain.ScopeElectionID
+	envelope.ScopeID = "election-1"
 	delegate := &recordingContextualValidator{
 		outcome: NewOutcome(envelope.ObjectID, StatusPendingDependencies),
 	}

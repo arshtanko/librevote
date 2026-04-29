@@ -80,12 +80,12 @@ func TestContextualValidatorRunnerAcceptsPresentDependency(t *testing.T) {
 	}
 }
 
-func TestContextualValidatorRunnerDoesNotPersistUnsupportedTallyKeySet(t *testing.T) {
+func TestContextualValidatorRunnerDoesNotPersistUnsupportedObjectType(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	runner := newStructuralContextualRunner(t, store)
 	envelope := runnerValidEnvelope(t)
-	envelope.ObjectType = domain.ObjectTypeTallyKeySet
+	envelope.ObjectType = domain.ObjectTypeTallyKeyContribution
 	envelope.Scope = domain.ScopeElectionID
 	envelope.ScopeID = "election-1"
 	envelope.ObjectID = runnerObjectIDForEnvelope(t, envelope)

@@ -58,9 +58,12 @@ func ValidateCanonicalPayloadWire(payload []byte) error {
 
 		switch wireType {
 		case 0:
-			_, n, err := consumeProtoVarint(payload)
+			value, n, err := consumeProtoVarint(payload)
 			if err != nil {
 				return fmt.Errorf("varint value: %w", err)
+			}
+			if value == 0 {
+				return fmt.Errorf("varint default value: %w", ErrInvalidCanonicalPayload)
 			}
 			payload = payload[n:]
 		case 1:
@@ -76,6 +79,9 @@ func ValidateCanonicalPayloadWire(payload []byte) error {
 			payload = payload[n:]
 			if length > uint64(len(payload)) {
 				return io.ErrUnexpectedEOF
+			}
+			if length == 0 {
+				return fmt.Errorf("length-delimited default value: %w", ErrInvalidCanonicalPayload)
 			}
 			payload = payload[int(length):]
 		case 5:
