@@ -2,8 +2,10 @@ package validation
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 
 	"librevote/internal/domain"
 )
@@ -20,6 +22,10 @@ var ErrContextualRuleUnsupported = errors.New("contextual rule is not implemente
 // It is defined where it is consumed so storage remains an implementation detail.
 type ContextualStore interface {
 	ValidationStatus(context.Context, string) (Status, bool, error)
+}
+
+type dependencyStatusStore interface {
+	DependencyStatus(context.Context, Dependency) (Status, bool, error)
 }
 
 // ContextualRule returns the dependencies and target status for one object type.
@@ -130,7 +136,7 @@ func (v *DefaultContextualValidator) checkDependencies(ctx context.Context, deps
 			return nil, nil, errors.New("dependency acceptable statuses are required")
 		}
 
-		status, exists, err := v.store.ValidationStatus(ctx, dep.ID)
+		status, exists, err := dependencyStatus(ctx, v.store, dep.Dependency)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -149,6 +155,13 @@ func (v *DefaultContextualValidator) checkDependencies(ctx context.Context, deps
 	return missing, rejected, nil
 }
 
+func dependencyStatus(ctx context.Context, store ContextualStore, dep Dependency) (Status, bool, error) {
+	if resolver, ok := store.(dependencyStatusStore); ok {
+		return resolver.DependencyStatus(ctx, dep)
+	}
+	return store.ValidationStatus(ctx, dep.ID)
+}
+
 func statusAccepted(status Status, acceptable []Status) bool {
 	for _, candidate := range acceptable {
 		if status == candidate {
@@ -164,6 +177,7 @@ func defaultContextualRules() map[domain.ObjectType]ContextualRule {
 	}
 	return map[domain.ObjectType]ContextualRule{
 		domain.ObjectTypeTrusteeSelectionElection: root,
+		domain.ObjectTypeAnonymousElection:        contextualAnonymousElection,
 	}
 }
 
@@ -174,4 +188,52 @@ func RequireObject(dependencyType, objectID string, acceptable ...Status) Requir
 		Dependency:         Dependency{Type: dependencyType, ID: objectID},
 		AcceptableStatuses: append([]Status(nil), acceptable...),
 	}
+}
+
+func contextualAnonymousElection(_ context.Context, envelope domain.ObjectEnvelope) (ContextualRuleResult, error) {
+	payload, err := decodePayload[domain.AnonymousElectionPayload](envelope)
+	if err != nil {
+		return ContextualRuleResult{}, err
+	}
+	return ContextualRuleResult{
+		Status: StatusValid,
+		RequiredDependencies: []RequiredDependency{
+			RequireObject("trustee_selection_result", TrusteeSelectionResultDependencyID(payload.TrusteeSelectionID, payload.TrusteeSelectionResultHash), StatusValid),
+		},
+	}, nil
+}
+
+func decodePayload[T any](envelope domain.ObjectEnvelope) (T, error) {
+	var zero T
+	decoded, err := domain.DecodePayload(envelope.ObjectType, envelope.Payload)
+	if err != nil {
+		return zero, err
+	}
+	payload, ok := decoded.(T)
+	if !ok {
+		return zero, fmt.Errorf("decoded %s payload has type %T", envelope.ObjectType, decoded)
+	}
+	return payload, nil
+}
+
+// TrusteeSelectionResultDependencyID deterministically binds a result dependency
+// to the trustee selection scope and the referenced preliminary result hash.
+func TrusteeSelectionResultDependencyID(trusteeSelectionID string, resultHash []byte) string {
+	if trusteeSelectionID == "" || len(resultHash) == 0 {
+		return ""
+	}
+	return trusteeSelectionID + ":" + hex.EncodeToString(resultHash)
+}
+
+// ParseTrusteeSelectionResultDependencyID reverses TrusteeSelectionResultDependencyID.
+func ParseTrusteeSelectionResultDependencyID(id string) (string, []byte, error) {
+	selectionID, resultHashHex, ok := strings.Cut(id, ":")
+	if !ok || selectionID == "" || resultHashHex == "" {
+		return "", nil, fmt.Errorf("invalid trustee_selection_result dependency id %q", id)
+	}
+	resultHash, err := hex.DecodeString(resultHashHex)
+	if err != nil {
+		return "", nil, err
+	}
+	return selectionID, resultHash, nil
 }

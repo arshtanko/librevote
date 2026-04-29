@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -24,13 +25,29 @@ func TestContextualValidatorRootObjectsAreValid(t *testing.T) {
 	}
 }
 
-func TestContextualValidatorAnonymousElectionRequiresExplicitRule(t *testing.T) {
+func TestContextualValidatorAnonymousElectionRequiresResultDependency(t *testing.T) {
 	validator, err := NewContextualValidator(memoryStatusStore{})
 	if err != nil {
 		t.Fatalf("NewContextualValidator() error = %v", err)
 	}
 
-	_, err = validator.ValidateContext(context.Background(), domain.ObjectEnvelope{ObjectID: "election-1", ObjectType: domain.ObjectTypeAnonymousElection})
+	outcome, err := validator.ValidateContext(context.Background(), domain.ObjectEnvelope{ObjectID: "election-1", ObjectType: domain.ObjectTypeAnonymousElection, Payload: validAnonymousElectionContextPayload()})
+	if err != nil {
+		t.Fatalf("ValidateContext() error = %v", err)
+	}
+	resultID := TrusteeSelectionResultDependencyID("selection-1", repeatedContextByte(0x31, 32))
+	if outcome.Status != StatusPendingDependencies || len(outcome.Dependencies) != 1 || outcome.Dependencies[0] != (Dependency{Type: "trustee_selection_result", ID: resultID}) {
+		t.Fatalf("outcome = %+v, want pending trustee_selection_result dependency", outcome)
+	}
+}
+
+func TestContextualValidatorTrusteeConsentRequiresExplicitRule(t *testing.T) {
+	validator, err := NewContextualValidator(memoryStatusStore{})
+	if err != nil {
+		t.Fatalf("NewContextualValidator() error = %v", err)
+	}
+
+	_, err = validator.ValidateContext(context.Background(), domain.ObjectEnvelope{ObjectID: "consent-1", ObjectType: domain.ObjectTypeTrusteeConsent, Payload: validTrusteeConsentContextPayload()})
 	if !errors.Is(err, ErrContextualRuleUnsupported) {
 		t.Fatalf("ValidateContext() error = %v, want %v", err, ErrContextualRuleUnsupported)
 	}
@@ -136,6 +153,101 @@ func TestContextualValidatorDoesNotShortcutActivationOrResults(t *testing.T) {
 			t.Fatalf("ValidateContext(%s) error = %v, want %v", objectType, err, ErrContextualRuleUnsupported)
 		}
 	}
+}
+
+func sameDependencies(got, want []Dependency) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+type contextPayloadBuilder struct{ bytes.Buffer }
+
+func (b *contextPayloadBuilder) stringField(field uint64, value string) {
+	writeContextProtoBytes(&b.Buffer, field, []byte(value))
+}
+
+func (b *contextPayloadBuilder) bytesField(field uint64, value []byte) {
+	writeContextProtoBytes(&b.Buffer, field, value)
+}
+
+func (b *contextPayloadBuilder) intField(field uint64, value int64) {
+	writeContextProtoVarint(&b.Buffer, field<<3)
+	writeContextProtoVarint(&b.Buffer, uint64(value))
+}
+
+func validAnonymousElectionContextPayload() []byte {
+	var b contextPayloadBuilder
+	b.stringField(1, "election-1")
+	b.stringField(2, "testnet")
+	b.stringField(3, "Title")
+	b.stringField(4, "Description")
+	b.stringField(5, "Yes")
+	b.stringField(5, "No")
+	b.bytesField(6, voterEntryContextPayload())
+	b.stringField(7, "selection-1")
+	b.bytesField(8, repeatedContextByte(0x31, 32))
+	b.intField(9, 2)
+	b.intField(10, 3)
+	b.stringField(11, domain.EligibilitySchemeBlindTokenV1)
+	b.intField(12, 1000)
+	b.intField(13, 2000)
+	b.intField(14, 3000)
+	b.intField(15, 4000)
+	b.intField(16, 5000)
+	b.bytesField(17, repeatedContextByte(0xaa, 32))
+	b.bytesField(18, repeatedContextByte(0xbb, 64))
+	return b.Bytes()
+}
+
+func validTrusteeConsentContextPayload() []byte {
+	var b contextPayloadBuilder
+	b.stringField(1, "selection-1")
+	b.bytesField(2, repeatedContextByte(0x31, 32))
+	b.stringField(3, "election-1")
+	b.bytesField(4, repeatedContextByte(0x41, 32))
+	b.bytesField(5, repeatedContextByte(0x51, 32))
+	b.bytesField(6, repeatedContextByte(0x61, 32))
+	b.intField(7, 2)
+	b.intField(8, 3)
+	b.bytesField(9, repeatedContextByte(0x71, 64))
+	return b.Bytes()
+}
+
+func voterEntryContextPayload() []byte {
+	var b contextPayloadBuilder
+	b.stringField(1, "voter-1")
+	b.bytesField(2, repeatedContextByte(0x11, 32))
+	b.bytesField(3, repeatedContextByte(0x21, 32))
+	return b.Bytes()
+}
+
+func repeatedContextByte(value byte, size int) []byte {
+	out := make([]byte, size)
+	for i := range out {
+		out[i] = value
+	}
+	return out
+}
+
+func writeContextProtoBytes(buf *bytes.Buffer, fieldNumber uint64, value []byte) {
+	writeContextProtoVarint(buf, fieldNumber<<3|2)
+	writeContextProtoVarint(buf, uint64(len(value)))
+	buf.Write(value)
+}
+
+func writeContextProtoVarint(buf *bytes.Buffer, value uint64) {
+	for value >= 0x80 {
+		buf.WriteByte(byte(value) | 0x80)
+		value >>= 7
+	}
+	buf.WriteByte(byte(value))
 }
 
 func TestContextualValidatorRejectsBadRules(t *testing.T) {
