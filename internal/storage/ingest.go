@@ -145,6 +145,11 @@ func (s *Store) IngestObject(ctx context.Context, input IngestObjectInput) (Inge
 			if !bytes.Equal(payloadHash, existingPayloadHash) {
 				return result, ErrPayloadMismatch
 			}
+			if _, err := tx.ExecContext(ctx,
+				"INSERT OR IGNORE INTO object_payloads(object_id, payload_bytes) VALUES (?, ?)",
+				input.ObjectID, input.PayloadBytes); err != nil {
+				return result, fmt.Errorf("restore missing object_payloads: %w", err)
+			}
 		}
 		if invalidExists {
 			if _, err := tx.ExecContext(ctx,
