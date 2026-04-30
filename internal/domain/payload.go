@@ -44,6 +44,22 @@ type TrusteeSelectionElectionPayload struct {
 	Signature          []byte
 }
 
+type TrusteeNominationPayload struct {
+	TrusteeSelectionID           string
+	CandidatePublicKey           []byte
+	CandidateBlindTokenPublicKey []byte
+	CandidateNodePeerID          string
+	Statement                    string
+	Signature                    []byte
+}
+
+type TrusteeVotePayload struct {
+	TrusteeSelectionID    string
+	VoterPublicKey        []byte
+	SelectedCandidateKeys [][]byte
+	Signature             []byte
+}
+
 type TrusteeCandidate struct {
 	TrusteePublicKey     []byte
 	BlindTokenPublicKey  []byte
@@ -127,6 +143,10 @@ func DecodePayload(objectType ObjectType, payload []byte) (any, error) {
 	switch objectType {
 	case ObjectTypeTrusteeSelectionElection:
 		return decodeTrusteeSelectionElection(payload)
+	case ObjectTypeTrusteeNomination:
+		return decodeTrusteeNomination(payload)
+	case ObjectTypeTrusteeVote:
+		return decodeTrusteeVote(payload)
 	case ObjectTypeTrusteeSelectionResult:
 		return decodeTrusteeSelectionResult(payload)
 	case ObjectTypeTrusteeConsent:
@@ -149,6 +169,10 @@ func ValidatePayloadShape(objectType ObjectType, payload []byte) error {
 	switch p := decoded.(type) {
 	case TrusteeSelectionElectionPayload:
 		return validateTrusteeSelectionElection(p)
+	case TrusteeNominationPayload:
+		return validateTrusteeNomination(p)
+	case TrusteeVotePayload:
+		return validateTrusteeVote(p)
 	case TrusteeSelectionResultPayload:
 		return validateTrusteeSelectionResult(p)
 	case TrusteeConsentPayload:
@@ -207,6 +231,50 @@ func decodeTrusteeSelectionElection(payload []byte) (TrusteeSelectionElectionPay
 			return unknownField(field)
 		}
 		return nil
+	})
+	return p, err
+}
+
+func decodeTrusteeNomination(payload []byte) (TrusteeNominationPayload, error) {
+	var p TrusteeNominationPayload
+	seen := map[uint64]struct{}{}
+	err := rangeProtoFields(payload, func(field uint64, wire uint64, value []byte) error {
+		switch field {
+		case 1:
+			return setString(seen, field, wire, value, &p.TrusteeSelectionID)
+		case 2:
+			return setBytes(seen, field, wire, value, &p.CandidatePublicKey)
+		case 3:
+			return setBytes(seen, field, wire, value, &p.CandidateBlindTokenPublicKey)
+		case 4:
+			return setString(seen, field, wire, value, &p.CandidateNodePeerID)
+		case 5:
+			return setString(seen, field, wire, value, &p.Statement)
+		case 6:
+			return setBytes(seen, field, wire, value, &p.Signature)
+		default:
+			return unknownField(field)
+		}
+	})
+	return p, err
+}
+
+func decodeTrusteeVote(payload []byte) (TrusteeVotePayload, error) {
+	var p TrusteeVotePayload
+	seen := map[uint64]struct{}{}
+	err := rangeProtoFields(payload, func(field uint64, wire uint64, value []byte) error {
+		switch field {
+		case 1:
+			return setString(seen, field, wire, value, &p.TrusteeSelectionID)
+		case 2:
+			return setBytes(seen, field, wire, value, &p.VoterPublicKey)
+		case 3:
+			return appendBytes(wire, value, &p.SelectedCandidateKeys)
+		case 4:
+			return setBytes(seen, field, wire, value, &p.Signature)
+		default:
+			return unknownField(field)
+		}
 	})
 	return p, err
 }
@@ -402,6 +470,33 @@ func validateTrusteeSelectionElection(p TrusteeSelectionElectionPayload) error {
 	return validatePublicSignature(p.CreatorPublicKey, p.Signature)
 }
 
+func validateTrusteeNomination(p TrusteeNominationPayload) error {
+	if p.TrusteeSelectionID == "" || len(p.CandidateBlindTokenPublicKey) == 0 {
+		return errors.New("required trustee nomination fields are missing")
+	}
+	return validatePublicSignature(p.CandidatePublicKey, p.Signature)
+}
+
+func validateTrusteeVote(p TrusteeVotePayload) error {
+	if p.TrusteeSelectionID == "" {
+		return errors.New("required trustee vote fields are missing")
+	}
+	if len(p.SelectedCandidateKeys) > MaxChoicesPerVoteV1 {
+		return errors.New("too many trustee vote choices")
+	}
+	seen := map[string]struct{}{}
+	for _, key := range p.SelectedCandidateKeys {
+		if len(key) != ed25519PublicKeySize {
+			return errors.New("invalid selected candidate public key")
+		}
+		if _, ok := seen[string(key)]; ok {
+			return errors.New("duplicate selected candidate public key")
+		}
+		seen[string(key)] = struct{}{}
+	}
+	return validatePublicSignature(p.VoterPublicKey, p.Signature)
+}
+
 func validateTrusteeSelectionResult(p TrusteeSelectionResultPayload) error {
 	if p.TrusteeSelectionID == "" || len(p.CandidateRanking) == 0 || len(p.CandidateScores) == 0 || len(p.ResultHash) != hashSize {
 		return errors.New("required trustee selection result fields are missing")
@@ -489,6 +584,9 @@ func validateCandidateScores(scores []CandidateScore) error {
 	for _, score := range scores {
 		if len(score.TrusteePublicKey) != ed25519PublicKeySize {
 			return errors.New("invalid candidate score trustee public key")
+		}
+		if score.Score < 0 {
+			return errors.New("candidate score must not be negative")
 		}
 		if _, ok := seenTrustees[string(score.TrusteePublicKey)]; ok {
 			return errors.New("duplicate candidate score trustee public key")

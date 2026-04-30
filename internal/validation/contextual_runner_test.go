@@ -158,7 +158,6 @@ func TestContextualValidatorRunnerDoesNotPersistUnsupportedObjectType(t *testing
 		scopeID    string
 		payload    []byte
 	}{
-		{name: "trustee selection result", objectType: domain.ObjectTypeTrusteeSelectionResult, scope: domain.ScopeTrusteeSelectionID, scopeID: "selection-1", payload: validTrusteeSelectionResultRunnerPayload()},
 		{name: "tally key set", objectType: domain.ObjectTypeTallyKeySet, scope: domain.ScopeElectionID, scopeID: "election-1", payload: validTallyKeySetRunnerPayload()},
 		{name: "tally key contribution", objectType: domain.ObjectTypeTallyKeyContribution, scope: domain.ScopeElectionID, scopeID: "election-1", payload: []byte{0x0a, 0x08, 'e', 'l', 'e', 'c', 't', 'i', 'o', 'n'}},
 	}

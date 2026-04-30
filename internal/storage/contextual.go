@@ -51,6 +51,8 @@ func (s *Store) DependencyStatus(ctx context.Context, dep validation.Dependency)
 		return "", false, errors.New("dependency type and id are required")
 	}
 	switch dep.Type {
+	case "trustee_selection":
+		return s.statusForTrusteeSelectionID(ctx, dep.ID)
 	case "election":
 		return s.statusForAnonymousElectionID(ctx, dep.ID)
 	case "trustee_selection_result":
@@ -62,6 +64,44 @@ func (s *Store) DependencyStatus(ctx context.Context, dep validation.Dependency)
 	default:
 		return s.ValidationStatus(ctx, dep.ID)
 	}
+}
+
+// TrusteeSelectionInputs returns retained local inputs needed to verify a
+// TrusteeSelectionResult by recomputation. It only exposes validation state and
+// decoded payloads; source peer and other network metadata are intentionally not
+// used.
+func (s *Store) TrusteeSelectionInputs(ctx context.Context, selectionID string) (validation.TrusteeSelectionInputs, error) {
+	if selectionID == "" {
+		return validation.TrusteeSelectionInputs{}, errors.New("trustee_selection_id is required")
+	}
+	status, found, err := s.statusForTrusteeSelectionID(ctx, selectionID)
+	if err != nil {
+		return validation.TrusteeSelectionInputs{}, err
+	}
+	inputs := validation.TrusteeSelectionInputs{ElectionFound: found, ElectionStatus: status}
+
+	nominations, err := s.trusteeSelectionNominations(ctx, selectionID)
+	if err != nil {
+		return validation.TrusteeSelectionInputs{}, err
+	}
+	votes, err := s.trusteeSelectionVotes(ctx, selectionID)
+	if err != nil {
+		return validation.TrusteeSelectionInputs{}, err
+	}
+	inputs.Nominations = nominations
+	inputs.Votes = votes
+	return inputs, nil
+}
+
+func (s *Store) statusForTrusteeSelectionID(ctx context.Context, selectionID string) (validation.Status, bool, error) {
+	return s.statusForDecodedPayload(ctx, domain.ObjectTypeTrusteeSelectionElection, func(payload []byte) (bool, error) {
+		decoded, err := domain.DecodePayload(domain.ObjectTypeTrusteeSelectionElection, payload)
+		if err != nil {
+			return false, err
+		}
+		election := decoded.(domain.TrusteeSelectionElectionPayload)
+		return election.TrusteeSelectionID == selectionID, nil
+	})
 }
 
 func (s *Store) statusForAnonymousElectionID(ctx context.Context, electionID string) (validation.Status, bool, error) {
@@ -133,4 +173,102 @@ func (s *Store) statusForDecodedPayload(ctx context.Context, objectType domain.O
 		return pendingStatus, true, nil
 	}
 	return "", false, nil
+}
+
+func (s *Store) trusteeSelectionNominations(ctx context.Context, selectionID string) ([]validation.TrusteeSelectionNominationInput, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT o.object_id, vr.validation_status, op.payload_bytes
+		 FROM objects o
+		 JOIN validation_records vr ON vr.object_id = o.object_id
+		 LEFT JOIN object_payloads op ON op.object_id = o.object_id
+		 WHERE o.object_type = ? AND o.scope = ? AND o.scope_id = ?
+		 ORDER BY o.object_id`,
+		string(domain.ObjectTypeTrusteeNomination), string(domain.ScopeTrusteeSelectionID), selectionID)
+	if err != nil {
+		return nil, fmt.Errorf("query trustee nominations: %w", err)
+	}
+	defer rows.Close()
+
+	var out []validation.TrusteeSelectionNominationInput
+	for rows.Next() {
+		var objectID, rawStatus string
+		var payload []byte
+		if err := rows.Scan(&objectID, &rawStatus, &payload); err != nil {
+			return nil, fmt.Errorf("scan trustee nomination: %w", err)
+		}
+		status, err := validation.ParseStatus(rawStatus)
+		if err != nil {
+			return nil, err
+		}
+		if !status.Final() {
+			out = append(out, validation.TrusteeSelectionNominationInput{ObjectID: objectID, Status: status})
+			continue
+		}
+		if len(payload) == 0 {
+			out = append(out, validation.TrusteeSelectionNominationInput{ObjectID: objectID, Status: validation.StatusPendingPayloadEvicted})
+			continue
+		}
+		decoded, err := domain.DecodePayload(domain.ObjectTypeTrusteeNomination, payload)
+		if err != nil {
+			return nil, fmt.Errorf("decode trustee nomination %s: %w", objectID, err)
+		}
+		nomination := decoded.(domain.TrusteeNominationPayload)
+		if nomination.TrusteeSelectionID != selectionID {
+			continue
+		}
+		out = append(out, validation.TrusteeSelectionNominationInput{ObjectID: objectID, Status: status, Payload: nomination})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read trustee nominations: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) trusteeSelectionVotes(ctx context.Context, selectionID string) ([]validation.TrusteeSelectionVoteInput, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT o.object_id, vr.validation_status, op.payload_bytes
+		 FROM objects o
+		 JOIN validation_records vr ON vr.object_id = o.object_id
+		 LEFT JOIN object_payloads op ON op.object_id = o.object_id
+		 WHERE o.object_type = ? AND o.scope = ? AND o.scope_id = ?
+		 ORDER BY o.object_id`,
+		string(domain.ObjectTypeTrusteeVote), string(domain.ScopeTrusteeSelectionID), selectionID)
+	if err != nil {
+		return nil, fmt.Errorf("query trustee votes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []validation.TrusteeSelectionVoteInput
+	for rows.Next() {
+		var objectID, rawStatus string
+		var payload []byte
+		if err := rows.Scan(&objectID, &rawStatus, &payload); err != nil {
+			return nil, fmt.Errorf("scan trustee vote: %w", err)
+		}
+		status, err := validation.ParseStatus(rawStatus)
+		if err != nil {
+			return nil, err
+		}
+		if !status.Final() {
+			out = append(out, validation.TrusteeSelectionVoteInput{ObjectID: objectID, Status: status})
+			continue
+		}
+		if len(payload) == 0 {
+			out = append(out, validation.TrusteeSelectionVoteInput{ObjectID: objectID, Status: validation.StatusPendingPayloadEvicted})
+			continue
+		}
+		decoded, err := domain.DecodePayload(domain.ObjectTypeTrusteeVote, payload)
+		if err != nil {
+			return nil, fmt.Errorf("decode trustee vote %s: %w", objectID, err)
+		}
+		vote := decoded.(domain.TrusteeVotePayload)
+		if vote.TrusteeSelectionID != selectionID {
+			continue
+		}
+		out = append(out, validation.TrusteeSelectionVoteInput{ObjectID: objectID, Status: status, Payload: vote})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read trustee votes: %w", err)
+	}
+	return out, nil
 }

@@ -73,8 +73,8 @@ func defaultStructuralChecks() map[domain.ObjectType]structuralCheck {
 	typed := validateTypedPayloadShape
 	return map[domain.ObjectType]structuralCheck{
 		domain.ObjectTypeTrusteeSelectionElection: typed,
-		domain.ObjectTypeTrusteeNomination:        check,
-		domain.ObjectTypeTrusteeVote:              check,
+		domain.ObjectTypeTrusteeNomination:        typed,
+		domain.ObjectTypeTrusteeVote:              typed,
 		domain.ObjectTypeTrusteeSelectionResult:   typed,
 		domain.ObjectTypeTrusteeConsent:           typed,
 		domain.ObjectTypeAnonymousElection:        typed,

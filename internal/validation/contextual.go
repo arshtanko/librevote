@@ -42,8 +42,10 @@ type RequiredDependency struct {
 // ContextualRuleResult is an object-specific contextual rule result before
 // storage-backed dependency checks are applied.
 type ContextualRuleResult struct {
-	Status               Status
-	RequiredDependencies []RequiredDependency
+	Status                Status
+	ValidationErrorCode   string
+	ValidationErrorReason string
+	RequiredDependencies  []RequiredDependency
 }
 
 // ContextualOption customizes ContextualValidator construction.
@@ -63,7 +65,7 @@ func NewContextualValidator(store ContextualStore, opts ...ContextualOption) (*D
 	}
 	v := &DefaultContextualValidator{
 		store: store,
-		rules: defaultContextualRules(),
+		rules: defaultContextualRules(store),
 	}
 	for _, opt := range opts {
 		opt(v)
@@ -121,7 +123,10 @@ func (v *DefaultContextualValidator) ValidateContext(ctx context.Context, envelo
 		return outcome, nil
 	}
 
-	return NewOutcome(envelope.ObjectID, result.Status), nil
+	outcome := NewOutcome(envelope.ObjectID, result.Status)
+	outcome.ValidationErrorCode = result.ValidationErrorCode
+	outcome.ValidationErrorReason = result.ValidationErrorReason
+	return outcome, nil
 }
 
 func (v *DefaultContextualValidator) checkDependencies(ctx context.Context, deps []RequiredDependency) ([]Dependency, []string, error) {
@@ -171,12 +176,13 @@ func statusAccepted(status Status, acceptable []Status) bool {
 	return false
 }
 
-func defaultContextualRules() map[domain.ObjectType]ContextualRule {
+func defaultContextualRules(store ContextualStore) map[domain.ObjectType]ContextualRule {
 	root := func(_ context.Context, _ domain.ObjectEnvelope) (ContextualRuleResult, error) {
 		return ContextualRuleResult{Status: StatusValid}, nil
 	}
 	return map[domain.ObjectType]ContextualRule{
 		domain.ObjectTypeTrusteeSelectionElection: root,
+		domain.ObjectTypeTrusteeSelectionResult:   contextualTrusteeSelectionResult(store),
 		domain.ObjectTypeAnonymousElection:        contextualAnonymousElection,
 	}
 }
