@@ -92,25 +92,25 @@ func TestContextualValidatorRunnerAnonymousElectionAcceptsPresentResult(t *testi
 	}
 }
 
-func TestContextualValidatorRunnerDoesNotPersistUnsupportedTrusteeConsent(t *testing.T) {
+func TestContextualValidatorRunnerTrusteeConsentPersistsMissingElectionDependency(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	runner := newStructuralContextualRunner(t, store)
 	envelope := runnerTrusteeConsentEnvelope(t)
 
-	_, err := runner.IngestAndValidate(ctx, envelope)
-	if !errors.Is(err, validation.ErrContextualRuleUnsupported) {
-		t.Fatalf("IngestAndValidate() error = %v, want %v", err, validation.ErrContextualRuleUnsupported)
+	result, err := runner.IngestAndValidate(ctx, envelope)
+	if err != nil {
+		t.Fatalf("IngestAndValidate() error = %v", err)
+	}
+	if result.Outcome.Status != validation.StatusPendingDependencies || result.Outcome.ShouldRepublish {
+		t.Fatalf("outcome = %+v, want pending without republish", result.Outcome)
 	}
 	deps, err := store.Dependencies(ctx, envelope.ObjectID)
 	if err != nil {
 		t.Fatalf("Dependencies() error = %v", err)
 	}
-	if len(deps) != 0 {
-		t.Fatalf("dependencies = %+v, want none for unsupported consent", deps)
-	}
-	if _, err := store.InvalidObjectRecord(ctx, envelope.ObjectID); err == nil {
-		t.Fatal("InvalidObjectRecord() succeeded for unsupported consent, want no destructive invalid record")
+	if len(deps) != 1 || deps[0] != (storage.Dependency{Type: "election", ID: "election-1"}) {
+		t.Fatalf("dependencies = %+v", deps)
 	}
 }
 
@@ -158,8 +158,8 @@ func TestContextualValidatorRunnerDoesNotPersistUnsupportedObjectType(t *testing
 		scopeID    string
 		payload    []byte
 	}{
-		{name: "tally key set", objectType: domain.ObjectTypeTallyKeySet, scope: domain.ScopeElectionID, scopeID: "election-1", payload: validTallyKeySetRunnerPayload()},
-		{name: "tally key contribution", objectType: domain.ObjectTypeTallyKeyContribution, scope: domain.ScopeElectionID, scopeID: "election-1", payload: []byte{0x0a, 0x08, 'e', 'l', 'e', 'c', 't', 'i', 'o', 'n'}},
+		{name: "blind token issue", objectType: domain.ObjectTypeBlindTokenIssue, scope: domain.ScopeElectionID, scopeID: "election-1", payload: []byte{0x0a, 0x08, 'e', 'l', 'e', 'c', 't', 'i', 'o', 'n'}},
+		{name: "tally result", objectType: domain.ObjectTypeTallyResult, scope: domain.ScopeElectionID, scopeID: "election-1", payload: []byte{0x0a, 0x08, 'e', 'l', 'e', 'c', 't', 'i', 'o', 'n'}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

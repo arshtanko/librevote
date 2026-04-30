@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -97,6 +98,31 @@ type TrusteeConsentPayload struct {
 	Signature                  []byte
 }
 
+type DKGCommitment struct {
+	SenderTrusteePublicKey []byte
+	CoefficientIndex       int64
+	Commitment             []byte
+}
+
+type DKGEncryptedShare struct {
+	SenderTrusteePublicKey    []byte
+	RecipientTrusteePublicKey []byte
+	RecipientTallySetupKeyID  []byte
+	RecipientIndex            int64
+	EncryptedShare            []byte
+	ShareEncryptionProof      []byte
+}
+
+type TallyKeyContributionPayload struct {
+	ElectionID                 string
+	TrusteePublicKey           []byte
+	TrusteeTallySetupPublicKey []byte
+	DKGCommitments             []DKGCommitment
+	DKGEncryptedShares         []DKGEncryptedShare
+	SetupProof                 []byte
+	Signature                  []byte
+}
+
 type AnonymousElectionPayload struct {
 	ElectionID                 string
 	NetworkID                  string
@@ -153,6 +179,8 @@ func DecodePayload(objectType ObjectType, payload []byte) (any, error) {
 		return decodeTrusteeConsent(payload)
 	case ObjectTypeAnonymousElection:
 		return decodeAnonymousElection(payload)
+	case ObjectTypeTallyKeyContribution:
+		return decodeTallyKeyContribution(payload)
 	case ObjectTypeTallyKeySet:
 		return decodeTallyKeySet(payload)
 	default:
@@ -179,6 +207,8 @@ func ValidatePayloadShape(objectType ObjectType, payload []byte) error {
 		return validateTrusteeConsent(p)
 	case AnonymousElectionPayload:
 		return validateAnonymousElection(p)
+	case TallyKeyContributionPayload:
+		return validateTallyKeyContribution(p)
 	case TallyKeySetPayload:
 		return validateTallyKeySet(p)
 	default:
@@ -352,6 +382,41 @@ func decodeTrusteeConsent(payload []byte) (TrusteeConsentPayload, error) {
 		default:
 			return unknownField(field)
 		}
+	})
+	return p, err
+}
+
+func decodeTallyKeyContribution(payload []byte) (TallyKeyContributionPayload, error) {
+	var p TallyKeyContributionPayload
+	seen := map[uint64]struct{}{}
+	err := rangeProtoFields(payload, func(field uint64, wire uint64, value []byte) error {
+		switch field {
+		case 1:
+			return setString(seen, field, wire, value, &p.ElectionID)
+		case 2:
+			return setBytes(seen, field, wire, value, &p.TrusteePublicKey)
+		case 3:
+			return setBytes(seen, field, wire, value, &p.TrusteeTallySetupPublicKey)
+		case 4:
+			commitment, err := decodeDKGCommitment(value)
+			if err != nil {
+				return err
+			}
+			p.DKGCommitments = append(p.DKGCommitments, commitment)
+		case 5:
+			share, err := decodeDKGEncryptedShare(value)
+			if err != nil {
+				return err
+			}
+			p.DKGEncryptedShares = append(p.DKGEncryptedShares, share)
+		case 6:
+			return setBytes(seen, field, wire, value, &p.SetupProof)
+		case 7:
+			return setBytes(seen, field, wire, value, &p.Signature)
+		default:
+			return unknownField(field)
+		}
+		return nil
 	})
 	return p, err
 }
@@ -532,6 +597,19 @@ func validateTrusteeConsent(p TrusteeConsentPayload) error {
 	return validatePublicSignature(p.TrusteePublicKey, p.Signature)
 }
 
+func validateTallyKeyContribution(p TallyKeyContributionPayload) error {
+	if p.ElectionID == "" || len(p.TrusteeTallySetupPublicKey) == 0 || len(p.DKGCommitments) == 0 || len(p.DKGEncryptedShares) == 0 || len(p.SetupProof) == 0 {
+		return errors.New("required tally key contribution fields are missing")
+	}
+	if err := validateDKGCommitments(p.TrusteePublicKey, p.DKGCommitments); err != nil {
+		return err
+	}
+	if err := validateDKGEncryptedShares(p.TrusteePublicKey, p.DKGEncryptedShares); err != nil {
+		return err
+	}
+	return validatePublicSignature(p.TrusteePublicKey, p.Signature)
+}
+
 func validateAnonymousElection(p AnonymousElectionPayload) error {
 	if p.ElectionID == "" || p.NetworkID == "" || p.Title == "" || p.TrusteeSelectionID == "" || len(p.TrusteeSelectionResultHash) != hashSize {
 		return errors.New("required anonymous election fields are missing")
@@ -592,6 +670,35 @@ func validateCandidateScores(scores []CandidateScore) error {
 			return errors.New("duplicate candidate score trustee public key")
 		}
 		seenTrustees[string(score.TrusteePublicKey)] = struct{}{}
+	}
+	return nil
+}
+
+func validateDKGCommitments(sender []byte, commitments []DKGCommitment) error {
+	previous := int64(-1)
+	for _, commitment := range commitments {
+		if len(commitment.SenderTrusteePublicKey) != ed25519PublicKeySize || !bytes.Equal(commitment.SenderTrusteePublicKey, sender) || len(commitment.Commitment) == 0 {
+			return errors.New("invalid dkg commitment")
+		}
+		if commitment.CoefficientIndex < 0 || commitment.CoefficientIndex <= previous {
+			return errors.New("dkg commitments must be sorted by coefficient index")
+		}
+		previous = commitment.CoefficientIndex
+	}
+	return nil
+}
+
+func validateDKGEncryptedShares(sender []byte, shares []DKGEncryptedShare) error {
+	seenRecipients := map[string]struct{}{}
+	for _, share := range shares {
+		if len(share.SenderTrusteePublicKey) != ed25519PublicKeySize || !bytes.Equal(share.SenderTrusteePublicKey, sender) || len(share.RecipientTrusteePublicKey) != ed25519PublicKeySize || len(share.RecipientTallySetupKeyID) == 0 || share.RecipientIndex <= 0 || len(share.EncryptedShare) == 0 || len(share.ShareEncryptionProof) == 0 {
+			return errors.New("invalid dkg encrypted share")
+		}
+		key := string(share.RecipientTrusteePublicKey)
+		if _, ok := seenRecipients[key]; ok {
+			return errors.New("duplicate dkg encrypted share recipient")
+		}
+		seenRecipients[key] = struct{}{}
 	}
 	return nil
 }
@@ -710,6 +817,48 @@ func decodeCandidateScore(payload []byte) (CandidateScore, error) {
 		}
 	})
 	return score, err
+}
+
+func decodeDKGCommitment(payload []byte) (DKGCommitment, error) {
+	var commitment DKGCommitment
+	seen := map[uint64]struct{}{}
+	err := rangeProtoFields(payload, func(field uint64, wire uint64, value []byte) error {
+		switch field {
+		case 1:
+			return setBytes(seen, field, wire, value, &commitment.SenderTrusteePublicKey)
+		case 2:
+			return setInt64(seen, field, wire, value, &commitment.CoefficientIndex)
+		case 3:
+			return setBytes(seen, field, wire, value, &commitment.Commitment)
+		default:
+			return unknownField(field)
+		}
+	})
+	return commitment, err
+}
+
+func decodeDKGEncryptedShare(payload []byte) (DKGEncryptedShare, error) {
+	var share DKGEncryptedShare
+	seen := map[uint64]struct{}{}
+	err := rangeProtoFields(payload, func(field uint64, wire uint64, value []byte) error {
+		switch field {
+		case 1:
+			return setBytes(seen, field, wire, value, &share.SenderTrusteePublicKey)
+		case 2:
+			return setBytes(seen, field, wire, value, &share.RecipientTrusteePublicKey)
+		case 3:
+			return setBytes(seen, field, wire, value, &share.RecipientTallySetupKeyID)
+		case 4:
+			return setInt64(seen, field, wire, value, &share.RecipientIndex)
+		case 5:
+			return setBytes(seen, field, wire, value, &share.EncryptedShare)
+		case 6:
+			return setBytes(seen, field, wire, value, &share.ShareEncryptionProof)
+		default:
+			return unknownField(field)
+		}
+	})
+	return share, err
 }
 
 func rangeProtoFields(payload []byte, fn func(field uint64, wire uint64, value []byte) error) error {

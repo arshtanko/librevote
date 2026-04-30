@@ -184,6 +184,9 @@ func defaultContextualRules(store ContextualStore) map[domain.ObjectType]Context
 		domain.ObjectTypeTrusteeSelectionElection: root,
 		domain.ObjectTypeTrusteeSelectionResult:   contextualTrusteeSelectionResult(store),
 		domain.ObjectTypeAnonymousElection:        contextualAnonymousElection,
+		domain.ObjectTypeTrusteeConsent:           contextualTrusteeConsent(store),
+		domain.ObjectTypeTallyKeyContribution:     contextualTallyKeyContribution(store),
+		domain.ObjectTypeTallyKeySet:              contextualTallyKeySet(store),
 	}
 }
 

@@ -294,6 +294,246 @@ func TestContextualValidatorTrusteeSelectionResultRequiresRecomputeStore(t *test
 	}
 }
 
+func TestContextualValidatorTallyKeySetRecomputesValidActivation(t *testing.T) {
+	store := tallyKeySetInputStore{inputs: recomputableTallyKeySetInputs(t)}
+	keySet := recomputedTallyKeySet(t, store.inputs)
+	validator, err := NewContextualValidator(store)
+	if err != nil {
+		t.Fatalf("NewContextualValidator() error = %v", err)
+	}
+
+	outcome, err := validator.ValidateContext(context.Background(), tallyKeySetEnvelope(keySet))
+	if err != nil {
+		t.Fatalf("ValidateContext() error = %v", err)
+	}
+	if outcome.Status != StatusValid || !outcome.ShouldRepublish {
+		t.Fatalf("outcome = %+v, want recomputed valid tally key set", outcome)
+	}
+}
+
+func TestContextualValidatorTallyKeySetMissingDependencies(t *testing.T) {
+	base := recomputableTallyKeySetInputs(t)
+	keySet := recomputedTallyKeySet(t, base)
+	tests := []struct {
+		name       string
+		mutate     func(*TallyKeySetInputs)
+		dependency string
+	}{
+		{name: "missing election", mutate: func(in *TallyKeySetInputs) { in.ElectionFound = false }, dependency: "election"},
+		{name: "missing result", mutate: func(in *TallyKeySetInputs) { in.ResultFound = false }, dependency: "trustee_selection_result"},
+		{name: "missing consent", mutate: func(in *TallyKeySetInputs) { in.Consents = in.Consents[:2] }, dependency: "trustee_consent"},
+		{name: "missing contribution", mutate: func(in *TallyKeySetInputs) { in.Contributions = in.Contributions[:2] }, dependency: "tally_key_contribution"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputs := base
+			inputs.Consents = append([]TrusteeConsentInput(nil), base.Consents...)
+			inputs.Contributions = append([]TallyKeyContributionInput(nil), base.Contributions...)
+			tt.mutate(&inputs)
+			validator, err := NewContextualValidator(tallyKeySetInputStore{inputs: inputs})
+			if err != nil {
+				t.Fatalf("NewContextualValidator() error = %v", err)
+			}
+			outcome, err := validator.ValidateContext(context.Background(), tallyKeySetEnvelope(keySet))
+			if err != nil {
+				t.Fatalf("ValidateContext() error = %v", err)
+			}
+			if outcome.Status != StatusPendingDependencies || len(outcome.Dependencies) != 1 || outcome.Dependencies[0].Type != tt.dependency {
+				t.Fatalf("outcome = %+v, want pending %s", outcome, tt.dependency)
+			}
+		})
+	}
+}
+
+func TestContextualValidatorTallyKeySetRejectsMismatches(t *testing.T) {
+	inputs := recomputableTallyKeySetInputs(t)
+	tests := []struct {
+		name   string
+		mutate func(*domain.TallyKeySetPayload)
+	}{
+		{name: "trustee set", mutate: func(p *domain.TallyKeySetPayload) {
+			p.TrusteeSet[0], p.TrusteeSet[1] = p.TrusteeSet[1], p.TrusteeSet[0]
+		}},
+		{name: "trustee set hash", mutate: func(p *domain.TallyKeySetPayload) { p.TrusteeSetHash[0] ^= 0xff }},
+		{name: "consent ids", mutate: func(p *domain.TallyKeySetPayload) { p.TrusteeConsentObjectIDs[0] = "other-consent" }},
+		{name: "contribution ids", mutate: func(p *domain.TallyKeySetPayload) { p.TallyKeyContributionObjectIDs[0] = "other-contribution" }},
+		{name: "activation hash", mutate: func(p *domain.TallyKeySetPayload) { p.TallyKeySetHash[0] ^= 0xff }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keySet := recomputedTallyKeySet(t, inputs)
+			tt.mutate(&keySet)
+			validator, err := NewContextualValidator(tallyKeySetInputStore{inputs: inputs})
+			if err != nil {
+				t.Fatalf("NewContextualValidator() error = %v", err)
+			}
+			outcome, err := validator.ValidateContext(context.Background(), tallyKeySetEnvelope(keySet))
+			if err != nil {
+				t.Fatalf("ValidateContext() error = %v", err)
+			}
+			if outcome.Status != StatusInvalid || outcome.ValidationErrorCode != ErrorTallyKeySetActivationMismatch {
+				t.Fatalf("outcome = %+v, want activation mismatch", outcome)
+			}
+		})
+	}
+}
+
+func TestContextualValidatorTallyKeySetExcludesConflictedInputs(t *testing.T) {
+	inputs := recomputableTallyKeySetInputs(t)
+	inputs.Consents[0].Status = StatusValidButConflicted
+	keySet := recomputedTallyKeySet(t, recomputableTallyKeySetInputs(t))
+	validator, err := NewContextualValidator(tallyKeySetInputStore{inputs: inputs})
+	if err != nil {
+		t.Fatalf("NewContextualValidator() error = %v", err)
+	}
+
+	outcome, err := validator.ValidateContext(context.Background(), tallyKeySetEnvelope(keySet))
+	if err != nil {
+		t.Fatalf("ValidateContext() error = %v", err)
+	}
+	if outcome.Status != StatusPendingDependencies || outcome.Dependencies[0].Type != "trustee_consent" {
+		t.Fatalf("outcome = %+v, want conflicted consent excluded from activation", outcome)
+	}
+}
+
+func TestContextualValidatorTallyKeySetIgnoresUnrelatedPendingActivationInputs(t *testing.T) {
+	inputs := recomputableTallyKeySetInputs(t)
+	keySet := recomputedTallyKeySet(t, inputs)
+	inputs.Consents = append(inputs.Consents, TrusteeConsentInput{ObjectID: "unrelated-pending-consent", Status: StatusPendingDependencies, Payload: domain.TrusteeConsentPayload{TrusteePublicKey: repeatedContextByte(0xee, 32)}})
+	inputs.Contributions = append(inputs.Contributions, TallyKeyContributionInput{ObjectID: "unrelated-pending-contribution", Status: StatusPendingDependencies, Payload: domain.TallyKeyContributionPayload{TrusteePublicKey: repeatedContextByte(0xef, 32)}})
+	validator, err := NewContextualValidator(tallyKeySetInputStore{inputs: inputs})
+	if err != nil {
+		t.Fatalf("NewContextualValidator() error = %v", err)
+	}
+
+	outcome, err := validator.ValidateContext(context.Background(), tallyKeySetEnvelope(keySet))
+	if err != nil {
+		t.Fatalf("ValidateContext() error = %v", err)
+	}
+	if outcome.Status != StatusValid {
+		t.Fatalf("outcome = %+v, want unrelated pending activation inputs ignored", outcome)
+	}
+}
+
+func TestContextualValidatorTallyKeySetRejectsDuplicateValidActivationInputs(t *testing.T) {
+	inputs := recomputableTallyKeySetInputs(t)
+	keySet := recomputedTallyKeySet(t, inputs)
+	inputs.Consents = append(inputs.Consents, TrusteeConsentInput{ObjectID: "duplicate-consent", Status: StatusValid, Payload: inputs.Consents[0].Payload})
+	validator, err := NewContextualValidator(tallyKeySetInputStore{inputs: inputs})
+	if err != nil {
+		t.Fatalf("NewContextualValidator() error = %v", err)
+	}
+
+	outcome, err := validator.ValidateContext(context.Background(), tallyKeySetEnvelope(keySet))
+	if err != nil {
+		t.Fatalf("ValidateContext() error = %v", err)
+	}
+	if outcome.Status != StatusInvalid {
+		t.Fatalf("outcome = %+v, want duplicate valid consent rejected", outcome)
+	}
+
+	inputs = recomputableTallyKeySetInputs(t)
+	keySet = recomputedTallyKeySet(t, inputs)
+	inputs.Contributions = append(inputs.Contributions, TallyKeyContributionInput{ObjectID: "duplicate-contribution", Status: StatusValid, Payload: inputs.Contributions[0].Payload})
+	validator, err = NewContextualValidator(tallyKeySetInputStore{inputs: inputs})
+	if err != nil {
+		t.Fatalf("NewContextualValidator() error = %v", err)
+	}
+	outcome, err = validator.ValidateContext(context.Background(), tallyKeySetEnvelope(keySet))
+	if err != nil {
+		t.Fatalf("ValidateContext() error = %v", err)
+	}
+	if outcome.Status != StatusInvalid {
+		t.Fatalf("outcome = %+v, want duplicate valid contribution rejected", outcome)
+	}
+}
+
+func TestContextualValidatorTallyKeySetRequiresDistinctFinalTrustees(t *testing.T) {
+	inputs := recomputableTallyKeySetInputs(t)
+	inputs.Result.CandidateRanking[1].TrusteePublicKey = append([]byte(nil), inputs.Result.CandidateRanking[0].TrusteePublicKey...)
+	keySet := recomputedTallyKeySet(t, recomputableTallyKeySetInputs(t))
+	validator, err := NewContextualValidator(tallyKeySetInputStore{inputs: inputs})
+	if err != nil {
+		t.Fatalf("NewContextualValidator() error = %v", err)
+	}
+
+	outcome, err := validator.ValidateContext(context.Background(), tallyKeySetEnvelope(keySet))
+	if err != nil {
+		t.Fatalf("ValidateContext() error = %v", err)
+	}
+	if outcome.Status != StatusPendingDependencies {
+		t.Fatalf("outcome = %+v, want duplicate ranked trustee to prevent distinct final set", outcome)
+	}
+}
+
+func TestContextualValidatorTrusteeConsentValidatesSignature(t *testing.T) {
+	inputs := recomputableTallyKeySetInputs(t)
+	validator, err := NewContextualValidator(tallyKeySetInputStore{inputs: inputs})
+	if err != nil {
+		t.Fatalf("NewContextualValidator() error = %v", err)
+	}
+
+	outcome, err := validator.ValidateContext(context.Background(), trusteeConsentEnvelope(inputs.Consents[0].Payload))
+	if err != nil {
+		t.Fatalf("ValidateContext() error = %v", err)
+	}
+	if outcome.Status != StatusValid {
+		t.Fatalf("outcome = %+v, want valid consent", outcome)
+	}
+
+	bad := inputs.Consents[0].Payload
+	bad.Signature = append([]byte(nil), bad.Signature...)
+	bad.Signature[0] ^= 0xff
+	outcome, err = validator.ValidateContext(context.Background(), trusteeConsentEnvelope(bad))
+	if err != nil {
+		t.Fatalf("ValidateContext() error = %v", err)
+	}
+	if outcome.Status != StatusInvalid {
+		t.Fatalf("outcome = %+v, want invalid signature", outcome)
+	}
+}
+
+func TestContextualValidatorTallyKeyContributionValidatesFinalSetAndSignature(t *testing.T) {
+	inputs := recomputableTallyKeySetInputs(t)
+	inputs.Consents = append(inputs.Consents, TrusteeConsentInput{ObjectID: "unrelated-pending-consent", Status: StatusPendingDependencies, Payload: domain.TrusteeConsentPayload{TrusteePublicKey: repeatedContextByte(0xee, 32)}})
+	validator, err := NewContextualValidator(tallyKeySetInputStore{inputs: inputs})
+	if err != nil {
+		t.Fatalf("NewContextualValidator() error = %v", err)
+	}
+
+	outcome, err := validator.ValidateContext(context.Background(), tallyKeyContributionEnvelope(inputs.Contributions[0].Payload))
+	if err != nil {
+		t.Fatalf("ValidateContext() error = %v", err)
+	}
+	if outcome.Status != StatusValid {
+		t.Fatalf("outcome = %+v, want unrelated pending consent ignored", outcome)
+	}
+
+	badShares := inputs.Contributions[0].Payload
+	badShares.DKGEncryptedShares = append([]domain.DKGEncryptedShare(nil), badShares.DKGEncryptedShares...)
+	badShares.DKGEncryptedShares[0].RecipientIndex = 99
+	outcome, err = validator.ValidateContext(context.Background(), tallyKeyContributionEnvelope(badShares))
+	if err != nil {
+		t.Fatalf("ValidateContext() error = %v", err)
+	}
+	if outcome.Status != StatusInvalid {
+		t.Fatalf("outcome = %+v, want invalid share binding", outcome)
+	}
+
+	badSignature := inputs.Contributions[0].Payload
+	badSignature.Signature = append([]byte(nil), badSignature.Signature...)
+	badSignature.Signature[0] ^= 0xff
+	outcome, err = validator.ValidateContext(context.Background(), tallyKeyContributionEnvelope(badSignature))
+	if err != nil {
+		t.Fatalf("ValidateContext() error = %v", err)
+	}
+	if outcome.Status != StatusInvalid {
+		t.Fatalf("outcome = %+v, want invalid signature", outcome)
+	}
+}
+
 func sameDependencies(got, want []Dependency) bool {
 	if len(got) != len(want) {
 		return false
@@ -440,6 +680,278 @@ func (s trusteeSelectionInputStore) ValidationStatus(context.Context, string) (S
 
 func (s trusteeSelectionInputStore) TrusteeSelectionInputs(context.Context, string) (TrusteeSelectionInputs, error) {
 	return s.inputs, nil
+}
+
+type tallyKeySetInputStore struct {
+	inputs TallyKeySetInputs
+}
+
+func (s tallyKeySetInputStore) ValidationStatus(context.Context, string) (Status, bool, error) {
+	return "", false, nil
+}
+
+func (s tallyKeySetInputStore) TallyKeySetInputs(context.Context, string, []byte) (TallyKeySetInputs, error) {
+	return s.inputs, nil
+}
+
+func (s tallyKeySetInputStore) ElectionActivationInputs(context.Context, string) (TallyKeySetInputs, error) {
+	return s.inputs, nil
+}
+
+func recomputableTallyKeySetInputs(t *testing.T) TallyKeySetInputs {
+	t.Helper()
+	selectionInputs := recomputableTrusteeSelectionInputs("", StatusValidForTally)
+	result := recomputedTrusteeSelectionResult(t, selectionInputs)
+	trusteeKeys := map[string]ed25519.PrivateKey{}
+	for i := 0; i < domain.TrusteeCountV1; i++ {
+		privateKey := ed25519.NewKeyFromSeed(repeatedContextByte(0x30+byte(i), ed25519.SeedSize))
+		publicKey := append([]byte(nil), privateKey.Public().(ed25519.PublicKey)...)
+		result.CandidateRanking[i].TrusteePublicKey = publicKey
+		if i < len(result.InitialSelectedTrustees) {
+			result.InitialSelectedTrustees[i].TrusteePublicKey = append([]byte(nil), publicKey...)
+		}
+		if i < len(result.CandidateScores) {
+			result.CandidateScores[i].TrusteePublicKey = append([]byte(nil), publicKey...)
+		}
+		trusteeKeys[string(publicKey)] = privateKey
+	}
+	result.ResultHash = ComputeTrusteeSelectionResultHash(result)
+	election := domain.AnonymousElectionPayload{
+		ElectionID:                 "election-1",
+		TrusteeSelectionID:         result.TrusteeSelectionID,
+		TrusteeSelectionResultHash: append([]byte(nil), result.ResultHash...),
+	}
+	consents := make([]TrusteeConsentInput, 0, domain.TrusteeCountV1)
+	contributions := make([]TallyKeyContributionInput, 0, domain.TrusteeCountV1)
+	for i, candidate := range result.CandidateRanking[:domain.TrusteeCountV1] {
+		index := byte(i + 1)
+		setupKey := repeatedContextByte(0x80+index, 32)
+		consent := domain.TrusteeConsentPayload{
+			TrusteeSelectionID:         result.TrusteeSelectionID,
+			TrusteeSelectionResultHash: append([]byte(nil), result.ResultHash...),
+			ElectionID:                 election.ElectionID,
+			ElectionParametersHash:     ComputeElectionParametersHash(election),
+			TrusteePublicKey:           append([]byte(nil), candidate.TrusteePublicKey...),
+			TrusteeTallySetupPublicKey: setupKey,
+			ThresholdT:                 domain.ThresholdV1,
+			TrusteeCountN:              domain.TrusteeCountV1,
+		}
+		consent.Signature = signContextPayload(t, domain.ObjectTypeTrusteeConsent, election.ElectionID, 9, trusteeConsentContextPayload(consent), trusteeKeys[string(candidate.TrusteePublicKey)])
+		consents = append(consents, TrusteeConsentInput{
+			ObjectID: "consent-" + string(rune('0'+index)),
+			Status:   StatusValid,
+			Payload:  consent,
+		})
+	}
+	finalSet, _, ok := deriveFinalTrusteeSet(result, consents)
+	if !ok {
+		t.Fatal("deriveFinalTrusteeSet() failed for fixture")
+	}
+	for i, trustee := range finalSet {
+		index := byte(i + 1)
+		contribution := domain.TallyKeyContributionPayload{
+			ElectionID:                 election.ElectionID,
+			TrusteePublicKey:           append([]byte(nil), trustee.TrusteePublicKey...),
+			TrusteeTallySetupPublicKey: append([]byte(nil), trustee.TrusteeTallySetupKey...),
+			DKGCommitments: []domain.DKGCommitment{{
+				SenderTrusteePublicKey: append([]byte(nil), trustee.TrusteePublicKey...),
+				CoefficientIndex:       1,
+				Commitment:             repeatedContextByte(0x90+index, 32),
+			}},
+			DKGEncryptedShares: tallyKeySetShares(trustee.TrusteePublicKey, finalSet),
+			SetupProof:         repeatedContextByte(0xa0+index, 32),
+		}
+		contribution.Signature = signContextPayload(t, domain.ObjectTypeTallyKeyContribution, election.ElectionID, 7, tallyKeyContributionContextPayload(contribution), trusteeKeys[string(trustee.TrusteePublicKey)])
+		contributions = append(contributions, TallyKeyContributionInput{
+			ObjectID: "contribution-" + string(rune('0'+index)),
+			Status:   StatusValid,
+			Payload:  contribution,
+		})
+	}
+	return TallyKeySetInputs{
+		ElectionFound:  true,
+		ElectionStatus: StatusValid,
+		Election:       election,
+		ResultFound:    true,
+		ResultStatus:   StatusValid,
+		Result:         result,
+		Consents:       consents,
+		Contributions:  contributions,
+	}
+}
+
+func tallyKeySetShares(sender []byte, trustees []domain.TrusteeCandidate) []domain.DKGEncryptedShare {
+	shares := make([]domain.DKGEncryptedShare, 0, len(trustees))
+	for i, trustee := range trustees {
+		index := byte(i + 1)
+		setupKeyID, err := lvcrypto.KeyID(lvcrypto.KeyTypeTrusteeTallySetup, trustee.TrusteeTallySetupKey)
+		if err != nil {
+			panic(err)
+		}
+		shares = append(shares, domain.DKGEncryptedShare{
+			SenderTrusteePublicKey:    append([]byte(nil), sender...),
+			RecipientTrusteePublicKey: append([]byte(nil), trustee.TrusteePublicKey...),
+			RecipientTallySetupKeyID:  append([]byte(nil), setupKeyID[:]...),
+			RecipientIndex:            int64(i + 1),
+			EncryptedShare:            repeatedContextByte(0xc0+index, 16),
+			ShareEncryptionProof:      repeatedContextByte(0xd0+index, 16),
+		})
+	}
+	return shares
+}
+
+func recomputedTallyKeySet(t *testing.T, inputs TallyKeySetInputs) domain.TallyKeySetPayload {
+	t.Helper()
+	finalSet, consentIDs, ok := deriveFinalTrusteeSet(inputs.Result, inputs.Consents)
+	if !ok {
+		t.Fatal("deriveFinalTrusteeSet() failed")
+	}
+	contributionIDs, commitments, setupProofs, contributionIssue, _ := retainedContributionsForTrustees(inputs.Election.ElectionID, finalSet, inputs.Contributions)
+	if contributionIssue != "" {
+		t.Fatalf("retainedContributionsForTrustees() failed: %s", contributionIssue)
+	}
+	keySet := domain.TallyKeySetPayload{
+		ElectionID:                    inputs.Election.ElectionID,
+		TrusteeSelectionResultHash:    append([]byte(nil), inputs.Election.TrusteeSelectionResultHash...),
+		TrusteeSet:                    finalSet,
+		TrusteeConsentObjectIDs:       consentIDs,
+		TallyKeyContributionObjectIDs: contributionIDs,
+		TrusteeSetHash:                ComputeTrusteeSetHash(finalSet),
+		ThresholdT:                    domain.ThresholdV1,
+		TrusteeCountN:                 domain.TrusteeCountV1,
+		TrusteeKeyCommitments:         commitments,
+		SetupProofs:                   setupProofs,
+	}
+	keySet.TallyPublicKey = ComputeTallyPublicKey(commitments)
+	keySet.TallyKeySetHash = ComputeTallyKeySetHash(keySet.ElectionID, keySet.TrusteeSelectionResultHash, keySet.TrusteeSet, keySet.TrusteeConsentObjectIDs, keySet.TallyKeyContributionObjectIDs, keySet.TrusteeKeyCommitments, keySet.TallyPublicKey)
+	privateKey := ed25519.NewKeyFromSeed(repeatedContextByte(0x44, ed25519.SeedSize))
+	keySet.ReporterPublicKey = append([]byte(nil), privateKey.Public().(ed25519.PublicKey)...)
+	keySet.Signature = signContextPayload(t, domain.ObjectTypeTallyKeySet, keySet.ElectionID, 14, tallyKeySetContextPayload(keySet), privateKey)
+	return keySet
+}
+
+func tallyKeySetEnvelope(payload domain.TallyKeySetPayload) domain.ObjectEnvelope {
+	return domain.ObjectEnvelope{ObjectID: "tally-key-set-1", ObjectType: domain.ObjectTypeTallyKeySet, ProtocolVersion: "1", NetworkID: "testnet", Scope: domain.ScopeElectionID, ScopeID: payload.ElectionID, CreatedAt: 1700000000000, Payload: tallyKeySetContextPayload(payload)}
+}
+
+func trusteeConsentEnvelope(payload domain.TrusteeConsentPayload) domain.ObjectEnvelope {
+	return domain.ObjectEnvelope{ObjectID: "consent-1", ObjectType: domain.ObjectTypeTrusteeConsent, ProtocolVersion: "1", NetworkID: "testnet", Scope: domain.ScopeElectionID, ScopeID: payload.ElectionID, CreatedAt: 1700000000000, Payload: trusteeConsentContextPayload(payload)}
+}
+
+func tallyKeyContributionEnvelope(payload domain.TallyKeyContributionPayload) domain.ObjectEnvelope {
+	return domain.ObjectEnvelope{ObjectID: "contribution-1", ObjectType: domain.ObjectTypeTallyKeyContribution, ProtocolVersion: "1", NetworkID: "testnet", Scope: domain.ScopeElectionID, ScopeID: payload.ElectionID, CreatedAt: 1700000000000, Payload: tallyKeyContributionContextPayload(payload)}
+}
+
+func signContextPayload(t *testing.T, objectType domain.ObjectType, electionID string, signatureField uint64, payload []byte, privateKey ed25519.PrivateKey) []byte {
+	t.Helper()
+	signedPayload, err := payloadWithoutField(payload, signatureField)
+	if err != nil {
+		t.Fatalf("payloadWithoutField() error = %v", err)
+	}
+	digest, err := lvcrypto.SigningDigest(lvcrypto.SigningContext{Domain: signingDomainForObjectType(objectType), ProtocolVersion: "1", NetworkID: "testnet", ObjectType: objectType, Scope: domain.ScopeElectionID, ScopeID: electionID, CreatedAt: 1700000000000}, signedPayload)
+	if err != nil {
+		t.Fatalf("SigningDigest() error = %v", err)
+	}
+	return ed25519.Sign(privateKey, digest[:])
+}
+
+func signingDomainForObjectType(objectType domain.ObjectType) lvcrypto.Domain {
+	switch objectType {
+	case domain.ObjectTypeTrusteeConsent:
+		return lvcrypto.DomainTrusteeConsentSign
+	case domain.ObjectTypeTallyKeyContribution:
+		return lvcrypto.DomainTallyKeyContributionSign
+	case domain.ObjectTypeTallyKeySet:
+		return lvcrypto.DomainTallyKeySetSign
+	default:
+		panic("unexpected signing object type")
+	}
+}
+
+func trusteeConsentContextPayload(payload domain.TrusteeConsentPayload) []byte {
+	var b contextPayloadBuilder
+	b.stringField(1, payload.TrusteeSelectionID)
+	b.bytesField(2, payload.TrusteeSelectionResultHash)
+	b.stringField(3, payload.ElectionID)
+	b.bytesField(4, payload.ElectionParametersHash)
+	b.bytesField(5, payload.TrusteePublicKey)
+	b.bytesField(6, payload.TrusteeTallySetupPublicKey)
+	b.intField(7, payload.ThresholdT)
+	b.intField(8, payload.TrusteeCountN)
+	b.bytesField(9, payload.Signature)
+	return b.Bytes()
+}
+
+func tallyKeyContributionContextPayload(payload domain.TallyKeyContributionPayload) []byte {
+	var b contextPayloadBuilder
+	b.stringField(1, payload.ElectionID)
+	b.bytesField(2, payload.TrusteePublicKey)
+	b.bytesField(3, payload.TrusteeTallySetupPublicKey)
+	for _, commitment := range payload.DKGCommitments {
+		b.bytesField(4, dkgCommitmentContextPayload(commitment))
+	}
+	for _, share := range payload.DKGEncryptedShares {
+		b.bytesField(5, dkgEncryptedShareContextPayload(share))
+	}
+	b.bytesField(6, payload.SetupProof)
+	b.bytesField(7, payload.Signature)
+	return b.Bytes()
+}
+
+func dkgCommitmentContextPayload(payload domain.DKGCommitment) []byte {
+	var b contextPayloadBuilder
+	b.bytesField(1, payload.SenderTrusteePublicKey)
+	b.intField(2, payload.CoefficientIndex)
+	b.bytesField(3, payload.Commitment)
+	return b.Bytes()
+}
+
+func dkgEncryptedShareContextPayload(payload domain.DKGEncryptedShare) []byte {
+	var b contextPayloadBuilder
+	b.bytesField(1, payload.SenderTrusteePublicKey)
+	b.bytesField(2, payload.RecipientTrusteePublicKey)
+	b.bytesField(3, payload.RecipientTallySetupKeyID)
+	b.intField(4, payload.RecipientIndex)
+	b.bytesField(5, payload.EncryptedShare)
+	b.bytesField(6, payload.ShareEncryptionProof)
+	return b.Bytes()
+}
+
+func tallyKeySetContextPayload(payload domain.TallyKeySetPayload) []byte {
+	var b contextPayloadBuilder
+	b.stringField(1, payload.ElectionID)
+	b.bytesField(2, payload.TrusteeSelectionResultHash)
+	for _, trustee := range payload.TrusteeSet {
+		b.bytesField(3, trusteeCandidateWithSetupContextPayload(trustee))
+	}
+	for _, objectID := range payload.TrusteeConsentObjectIDs {
+		b.stringField(4, objectID)
+	}
+	for _, objectID := range payload.TallyKeyContributionObjectIDs {
+		b.stringField(5, objectID)
+	}
+	b.bytesField(6, payload.TrusteeSetHash)
+	b.intField(7, payload.ThresholdT)
+	b.intField(8, payload.TrusteeCountN)
+	b.bytesField(9, payload.TallyPublicKey)
+	for _, commitment := range payload.TrusteeKeyCommitments {
+		b.bytesField(10, commitment)
+	}
+	for _, proof := range payload.SetupProofs {
+		b.bytesField(11, proof)
+	}
+	b.bytesField(12, payload.TallyKeySetHash)
+	b.bytesField(13, payload.ReporterPublicKey)
+	b.bytesField(14, payload.Signature)
+	return b.Bytes()
+}
+
+func trusteeCandidateWithSetupContextPayload(candidate domain.TrusteeCandidate) []byte {
+	var b contextPayloadBuilder
+	b.bytesField(1, candidate.TrusteePublicKey)
+	b.bytesField(2, candidate.BlindTokenPublicKey)
+	b.bytesField(3, candidate.TrusteeTallySetupKey)
+	return b.Bytes()
 }
 
 func recomputableTrusteeSelectionInputs(conflictedNominationStatus Status, conflictedVoteStatus Status) TrusteeSelectionInputs {

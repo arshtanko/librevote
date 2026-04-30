@@ -78,7 +78,7 @@ func defaultStructuralChecks() map[domain.ObjectType]structuralCheck {
 		domain.ObjectTypeTrusteeSelectionResult:   typed,
 		domain.ObjectTypeTrusteeConsent:           typed,
 		domain.ObjectTypeAnonymousElection:        typed,
-		domain.ObjectTypeTallyKeyContribution:     check,
+		domain.ObjectTypeTallyKeyContribution:     typed,
 		domain.ObjectTypeTallyKeySet:              typed,
 		domain.ObjectTypeBlindTokenRequest:        check,
 		domain.ObjectTypeBlindTokenIssue:          check,
