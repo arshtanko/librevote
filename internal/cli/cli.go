@@ -15,23 +15,15 @@ Usage:
   librevote version
   librevote <command> [arguments]
 
-Command groups:
-  librevote init
-  librevote node ...
-  librevote key ...
-  librevote peer ...
-  librevote sync ...
-  librevote trustee-selection ...
-  librevote trustee ...
-  librevote election ...
-  librevote token ...
-  librevote vote ...
-  librevote tally ...
-  librevote result ...
-  librevote object ...
+Commands:
+  librevote init --db <path> --network <network_id>
+  librevote trustee-election create --db <path> --id <id> --title <title> [--network <id>]
+  librevote trustee nominate --db <path> --selection <id> --name <candidate_name> [--network <id>]
+  librevote trustee vote --db <path> --selection <id> --voter <name> --candidates <name1,name2,name3> [--network <id>]
+  librevote trustee result build --db <path> --selection <id> [--network <id>]
 `
 
-// Run executes the minimal CLI surface for the repository foundation stage.
+// Run executes the CLI surface for the MVP trustee-selection stage.
 func Run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stdout, usage)
@@ -53,6 +45,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stdout, version)
 		return 0
+	case "init":
+		return cmdInit(args[1:], stdout, stderr)
+	case "trustee-election":
+		return cmdTrusteeElection(args[1:], stdout, stderr)
+	case "trustee":
+		return cmdTrustee(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "error: unknown command %q\n", args[0])
 		return 2

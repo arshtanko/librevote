@@ -3,7 +3,12 @@ package app
 import (
 	"context"
 	"crypto/ed25519"
+	"database/sql"
+	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"time"
 
 	"librevote/internal/crypto"
@@ -240,4 +245,44 @@ func (s *Service) buildEnvelope(objectType domain.ObjectType, scope domain.Scope
 	}
 	envelope.ObjectID = objectID.String()
 	return envelope, nil
+}
+
+const databaseFileName = "librevote.sqlite"
+
+func ReadNetworkID(dataDir string) (string, error) {
+	dbPath := filepath.Join(dataDir, databaseFileName)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return "", fmt.Errorf("no database at %s: run init first", dataDir)
+	}
+	dsn := (&url.URL{Scheme: "file", Path: dbPath}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return "", fmt.Errorf("open database: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	rows, err := db.Query("SELECT key, value FROM schema_metadata")
+	if err != nil {
+		return "", fmt.Errorf("read schema metadata: %w", err)
+	}
+	defer rows.Close()
+
+	values := make(map[string]string)
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return "", fmt.Errorf("scan schema metadata: %w", err)
+		}
+		values[key] = value
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("iterate schema metadata: %w", err)
+	}
+
+	networkID, ok := values["network_id"]
+	if !ok || networkID == "" {
+		return "", errors.New("schema metadata missing network_id")
+	}
+	return networkID, nil
 }
