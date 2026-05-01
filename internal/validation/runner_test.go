@@ -394,7 +394,7 @@ func TestRunnerWithStructuralValidatorPersistsDelegatedValidOutcome(t *testing.T
 	}
 }
 
-func TestRunnerRejectsUnsupportedPersistenceFlags(t *testing.T) {
+func TestRunnerPersistsWorkerFacingOutcomeFlags(t *testing.T) {
 	store := openTestStore(t)
 	envelope := runnerValidEnvelope(t)
 	runner, err := validation.NewRunner(validation.RunnerConfig{
@@ -415,8 +415,19 @@ func TestRunnerRejectsUnsupportedPersistenceFlags(t *testing.T) {
 		t.Fatalf("NewRunner() error = %v", err)
 	}
 
-	if _, err := runner.IngestAndValidate(context.Background(), envelope); err == nil {
-		t.Fatal("IngestAndValidate() error = nil, want unsupported persistence fields error")
+	result, err := runner.IngestAndValidate(context.Background(), envelope)
+	if err != nil {
+		t.Fatalf("IngestAndValidate() error = %v", err)
+	}
+	if result.Outcome.AffectedScope.Scope != domain.ScopeElectionID || !result.Outcome.ShouldRecomputeState {
+		t.Fatalf("outcome = %+v, want worker-facing flags preserved", result.Outcome)
+	}
+	meta, err := store.ValidationOutcomeMetadata(context.Background(), envelope.ObjectID)
+	if err != nil {
+		t.Fatalf("ValidationOutcomeMetadata() error = %v", err)
+	}
+	if meta.AffectedScope != result.Outcome.AffectedScope || !meta.ShouldRecomputeState {
+		t.Fatalf("metadata = %+v, want persisted outcome flags", meta)
 	}
 }
 

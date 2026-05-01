@@ -75,9 +75,41 @@ func TestRepublishEligibleObjectsListsOnlyDocumentedStatuses(t *testing.T) {
 		if !item.ValidationStatus.RepublishEligible() {
 			t.Fatalf("republish item has status %q", item.ValidationStatus)
 		}
+		if !item.ShouldRepublish {
+			t.Fatalf("republish item missing persisted flag: %+v", item)
+		}
 		if item.ObjectID == evicted.ObjectID || item.ObjectID == invalid.ObjectID || item.ObjectID == pending.ObjectID {
 			t.Fatalf("non-republishable object listed: %+v", item)
 		}
+	}
+}
+
+func TestRecomputeStateObjectsListsPersistedOutcomeFlags(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, Config{DataDir: t.TempDir(), NetworkID: "testnet"})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	flagged := defaultIngestInput("worklist-recompute", domain.ValidationStatusValid)
+	flagged.AffectedScope = validation.AffectedScope{Scope: domain.ScopeElectionID, ScopeID: "election-1"}
+	flagged.ShouldRecomputeState = true
+	if _, err := store.IngestObject(ctx, flagged); err != nil {
+		t.Fatalf("IngestObject(flagged) error = %v", err)
+	}
+
+	unflagged := defaultIngestInput("worklist-no-recompute", domain.ValidationStatusValid)
+	if _, err := store.IngestObject(ctx, unflagged); err != nil {
+		t.Fatalf("IngestObject(unflagged) error = %v", err)
+	}
+
+	got, err := store.RecomputeStateObjects(ctx)
+	if err != nil {
+		t.Fatalf("RecomputeStateObjects() error = %v", err)
+	}
+	if len(got) != 1 || got[0].ObjectID != flagged.ObjectID || got[0].AffectedScope != flagged.AffectedScope || !got[0].ShouldRecomputeState {
+		t.Fatalf("RecomputeStateObjects() = %+v, want only flagged object", got)
 	}
 }
 

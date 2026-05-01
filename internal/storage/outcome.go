@@ -32,14 +32,8 @@ func (s *Store) ApplyValidationOutcome(ctx context.Context, input ApplyValidatio
 	if input.CheckedAt <= 0 {
 		return errors.New("checked_at must be greater than zero")
 	}
-	if input.Outcome.AffectedScope.Scope != "" || input.Outcome.AffectedScope.ScopeID != "" {
-		return errors.New("validation outcome affected scope is not supported by storage schema")
-	}
-	if input.Outcome.ShouldRepublish {
-		return errors.New("validation outcome republish flag is not supported by storage schema")
-	}
-	if input.Outcome.ShouldRecomputeState {
-		return errors.New("validation outcome recompute-state flag is not supported by storage schema")
+	if err := validateOutcomeWorkerMetadata(input.Outcome); err != nil {
+		return err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -91,6 +85,9 @@ func (s *Store) ApplyValidationOutcome(ctx context.Context, input ApplyValidatio
 	}
 
 	if err := replaceDependencies(ctx, tx, input.Outcome.ObjectID, outcomeDomainStatus(input.Outcome.Status), outcomeDependencies(input.Outcome.Dependencies)); err != nil {
+		return err
+	}
+	if err := upsertValidationOutcomeMetadata(ctx, tx, input.Outcome, input.CheckedAt); err != nil {
 		return err
 	}
 	newConflicts := conflictsForOutcome(input.Outcome)

@@ -142,7 +142,7 @@ func TestApplyValidationOutcomePersistsConflictKeys(t *testing.T) {
 	}
 }
 
-func TestApplyValidationOutcomeRejectsUnsupportedScopeAndFlags(t *testing.T) {
+func TestApplyValidationOutcomePersistsWorkerFacingFlags(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, Config{DataDir: t.TempDir(), NetworkID: "testnet"})
 	if err != nil {
@@ -150,46 +150,108 @@ func TestApplyValidationOutcomeRejectsUnsupportedScopeAndFlags(t *testing.T) {
 	}
 	defer store.Close()
 
-	input := defaultIngestInput("outcome-unsupported", domain.ValidationStatusValid)
+	input := defaultIngestInput("outcome-flags", domain.ValidationStatusPendingDependencies)
+	input.Dependencies = []Dependency{{Type: "election", ID: "old-election"}}
 	if _, err := store.IngestObject(ctx, input); err != nil {
 		t.Fatalf("IngestObject() error = %v", err)
 	}
 
-	tests := []struct {
-		name    string
-		mutate  func(*validation.Outcome)
-		wantErr string
-	}{
-		{
-			name: "affected scope",
-			mutate: func(outcome *validation.Outcome) {
-				outcome.AffectedScope = validation.AffectedScope{Scope: domain.ScopeElectionID, ScopeID: "election-1"}
-			},
-			wantErr: "affected scope",
-		},
-		{
-			name: "should republish",
-			mutate: func(outcome *validation.Outcome) {
-				outcome.ShouldRepublish = true
-			},
-			wantErr: "republish flag",
-		},
-		{
-			name: "should recompute state",
-			mutate: func(outcome *validation.Outcome) {
-				outcome.ShouldRecomputeState = true
-			},
-			wantErr: "recompute-state flag",
-		},
+	outcome := validation.NewOutcome(input.ObjectID, validation.StatusValid)
+	outcome.AffectedScope = validation.AffectedScope{Scope: domain.ScopeElectionID, ScopeID: "election-1"}
+	outcome.ShouldRecomputeState = true
+	if err := store.ApplyValidationOutcome(ctx, ApplyValidationOutcomeInput{Outcome: outcome, ValidatorVersion: "v2", CheckedAt: 7000}); err != nil {
+		t.Fatalf("ApplyValidationOutcome() error = %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			outcome := validation.Outcome{ObjectID: input.ObjectID, Status: validation.StatusValid}
-			tt.mutate(&outcome)
-			if err := store.ApplyValidationOutcome(ctx, ApplyValidationOutcomeInput{Outcome: outcome, ValidatorVersion: "v2", CheckedAt: 7000}); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("ApplyValidationOutcome() error = %v, want %q", err, tt.wantErr)
-			}
-		})
+
+	meta, err := store.ValidationOutcomeMetadata(ctx, input.ObjectID)
+	if err != nil {
+		t.Fatalf("ValidationOutcomeMetadata() error = %v", err)
+	}
+	if meta.AffectedScope != outcome.AffectedScope || !meta.ShouldRepublish || !meta.ShouldRecomputeState || meta.UpdatedAt != 7000 {
+		t.Fatalf("validation outcome metadata = %+v, want flags from outcome %+v", meta, outcome)
+	}
+
+	recompute, err := store.RecomputeStateObjects(ctx)
+	if err != nil {
+		t.Fatalf("RecomputeStateObjects() error = %v", err)
+	}
+	if len(recompute) != 1 || recompute[0].ObjectID != input.ObjectID || recompute[0].AffectedScope != outcome.AffectedScope || !recompute[0].ShouldRecomputeState {
+		t.Fatalf("RecomputeStateObjects() = %+v, want flagged object", recompute)
+	}
+}
+
+func TestPersistEnvelopeValidationOutcomePreservesExplicitNoRepublish(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, Config{DataDir: t.TempDir(), NetworkID: "testnet"})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	envelope := domain.ObjectEnvelope{
+		ObjectID:        "runner-no-republish",
+		ObjectType:      domain.ObjectTypeAnonymousElection,
+		ProtocolVersion: "v1",
+		NetworkID:       "testnet",
+		Scope:           domain.ScopeNetwork,
+		CreatedAt:       1000,
+		Pow:             []byte{0x01},
+		Payload:         []byte("payload-runner-no-republish"),
+	}
+	outcome := validation.Outcome{
+		ObjectID:        envelope.ObjectID,
+		Status:          validation.StatusValid,
+		ShouldRepublish: false,
+	}
+
+	if _, err := store.PersistEnvelopeValidationOutcome(ctx, envelope, outcome, validation.PersistenceInput{
+		ValidatorVersion: validation.ValidatorVersionEnvelopeRunner,
+		SeenAt:           2000,
+		CheckedAt:        3000,
+	}); err != nil {
+		t.Fatalf("PersistEnvelopeValidationOutcome() error = %v", err)
+	}
+
+	meta, err := store.ValidationOutcomeMetadata(ctx, envelope.ObjectID)
+	if err != nil {
+		t.Fatalf("ValidationOutcomeMetadata() error = %v", err)
+	}
+	if meta.ShouldRepublish {
+		t.Fatalf("should_republish = true, want false")
+	}
+
+	republish, err := store.RepublishEligibleObjects(ctx)
+	if err != nil {
+		t.Fatalf("RepublishEligibleObjects() error = %v", err)
+	}
+	for _, item := range republish {
+		if item.ObjectID == envelope.ObjectID {
+			t.Fatalf("RepublishEligibleObjects() included explicit no-republish object: %+v", republish)
+		}
+	}
+}
+
+func TestApplyValidationOutcomeRejectsInvalidWorkerFlags(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, Config{DataDir: t.TempDir(), NetworkID: "testnet"})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	input := defaultIngestInput("outcome-bad-flags", domain.ValidationStatusValid)
+	if _, err := store.IngestObject(ctx, input); err != nil {
+		t.Fatalf("IngestObject() error = %v", err)
+	}
+
+	outcome := validation.Outcome{
+		ObjectID:        input.ObjectID,
+		Status:          validation.StatusPendingDependencies,
+		Dependencies:    []validation.Dependency{{Type: "election", ID: "election-1"}},
+		ShouldRepublish: true,
+	}
+	if err := store.ApplyValidationOutcome(ctx, ApplyValidationOutcomeInput{Outcome: outcome, ValidatorVersion: "v2", CheckedAt: 7000}); err == nil || !strings.Contains(err.Error(), "should_republish") {
+		t.Fatalf("ApplyValidationOutcome() error = %v, want should_republish rejection", err)
 	}
 }
 

@@ -26,11 +26,8 @@ func (s *Store) PersistEnvelopeValidationOutcome(ctx context.Context, envelope d
 	if !outcome.Status.Valid() {
 		return validation.PersistenceResult{}, fmt.Errorf("unknown validation status %q", outcome.Status)
 	}
-	if outcome.AffectedScope.Scope != "" || outcome.AffectedScope.ScopeID != "" {
-		return validation.PersistenceResult{}, errors.New("affected scope is not supported by envelope persistence")
-	}
-	if outcome.ShouldRecomputeState {
-		return validation.PersistenceResult{}, errors.New("recompute flag is not supported by envelope persistence")
+	if err := validateOutcomeWorkerMetadata(outcome); err != nil {
+		return validation.PersistenceResult{}, err
 	}
 
 	var protocolVersion int
@@ -58,6 +55,10 @@ func (s *Store) PersistEnvelopeValidationOutcome(ctx context.Context, envelope d
 		ValidatorVersion:       input.ValidatorVersion,
 		Dependencies:           runnerDependencies(outcome.Dependencies),
 		ConflictKeys:           conflictMetadataFromValidation(outcome.ObjectID, outcome.ConflictKeys),
+		AffectedScope:          outcome.AffectedScope,
+		ShouldRepublish:        outcome.ShouldRepublish,
+		ShouldRepublishSet:     true,
+		ShouldRecomputeState:   outcome.ShouldRecomputeState,
 		SeenAt:                 input.SeenAt,
 		CheckedAt:              input.CheckedAt,
 	})

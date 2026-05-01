@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"librevote/internal/domain"
+	"librevote/internal/validation"
 )
 
 var (
@@ -47,6 +48,10 @@ type IngestObjectInput struct {
 	ValidatorVersion       string
 	Dependencies           []Dependency
 	ConflictKeys           []ConflictMetadata
+	AffectedScope          validation.AffectedScope
+	ShouldRepublish        bool
+	ShouldRepublishSet     bool
+	ShouldRecomputeState   bool
 	SeenAt                 int64
 	CheckedAt              int64
 }
@@ -93,6 +98,14 @@ func (s *Store) IngestObject(ctx context.Context, input IngestObjectInput) (Inge
 
 	if err := validateIngestInput(input); err != nil {
 		return result, err
+	}
+	var workerOutcome validation.Outcome
+	if input.ValidationStatus != domain.ValidationStatusInvalid {
+		var err error
+		workerOutcome, err = outcomeMetadataFromIngest(input)
+		if err != nil {
+			return result, err
+		}
 	}
 
 	payloadHash := computePayloadHash(input.PayloadBytes)
@@ -253,6 +266,9 @@ func (s *Store) IngestObject(ctx context.Context, input IngestObjectInput) (Inge
 			if err := replaceDependencies(ctx, tx, input.ObjectID, input.ValidationStatus, input.Dependencies); err != nil {
 				return result, err
 			}
+			if err := upsertValidationOutcomeMetadata(ctx, tx, workerOutcome, input.CheckedAt); err != nil {
+				return result, err
+			}
 			conflicts := conflictsForDomainStatus(input.ObjectID, input.ValidationStatus, input.ConflictKeys)
 			if err := validateConflictMetadata(input.ObjectID, conflicts); err != nil {
 				return result, err
@@ -305,6 +321,9 @@ func (s *Store) IngestObject(ctx context.Context, input IngestObjectInput) (Inge
 		}
 
 		if err := replaceDependencies(ctx, tx, input.ObjectID, input.ValidationStatus, input.Dependencies); err != nil {
+			return result, err
+		}
+		if err := upsertValidationOutcomeMetadata(ctx, tx, workerOutcome, input.CheckedAt); err != nil {
 			return result, err
 		}
 		conflicts := conflictsForDomainStatus(input.ObjectID, input.ValidationStatus, input.ConflictKeys)
@@ -400,6 +419,12 @@ func (s *Store) EvictPendingPayload(ctx context.Context, objectID string, checke
 		"DELETE FROM object_conflict_keys WHERE object_id = ?",
 		objectID); err != nil {
 		return fmt.Errorf("delete object_conflict_keys: %w", err)
+	}
+	if err := upsertValidationOutcomeMetadata(ctx, tx, validation.Outcome{
+		ObjectID: objectID,
+		Status:   validation.StatusPendingPayloadEvicted,
+	}, checkedAt); err != nil {
+		return err
 	}
 
 	return tx.Commit()

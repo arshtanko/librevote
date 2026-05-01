@@ -21,6 +21,7 @@ func TestOpenCreatesAllDocumentedTables(t *testing.T) {
 		"objects",
 		"object_payloads",
 		"validation_records",
+		"validation_outcome_metadata",
 		"object_dependencies",
 		"invalid_object_records",
 		"election_state",
@@ -128,6 +129,25 @@ func TestValidationRecordsColumns(t *testing.T) {
 		{"last_checked_at", true, false},
 	}
 	assertColumns(t, ctx, store.db, "validation_records", wantCols)
+}
+
+func TestValidationOutcomeMetadataColumns(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, Config{DataDir: t.TempDir(), NetworkID: "testnet"})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	wantCols := []columnSpec{
+		{"object_id", true, true},
+		{"affected_scope", true, false},
+		{"affected_scope_id", true, false},
+		{"should_republish", true, false},
+		{"should_recompute_state", true, false},
+		{"updated_at", true, false},
+	}
+	assertColumns(t, ctx, store.db, "validation_outcome_metadata", wantCols)
 }
 
 func TestObjectDependenciesColumns(t *testing.T) {

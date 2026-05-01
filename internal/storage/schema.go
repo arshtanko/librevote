@@ -42,6 +42,19 @@ CREATE TABLE IF NOT EXISTS validation_records (
 CREATE INDEX IF NOT EXISTS idx_validation_status_checked ON validation_records(validation_status, last_checked_at);
 CREATE INDEX IF NOT EXISTS idx_validation_version ON validation_records(validator_version);
 
+CREATE TABLE IF NOT EXISTS validation_outcome_metadata (
+	object_id TEXT NOT NULL PRIMARY KEY,
+	affected_scope TEXT NOT NULL,
+	affected_scope_id TEXT NOT NULL,
+	should_republish INTEGER NOT NULL CHECK(should_republish IN (0, 1)),
+	should_recompute_state INTEGER NOT NULL CHECK(should_recompute_state IN (0, 1)),
+	updated_at INTEGER NOT NULL,
+	FOREIGN KEY(object_id) REFERENCES objects(object_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_validation_outcome_republish ON validation_outcome_metadata(should_republish, updated_at);
+CREATE INDEX IF NOT EXISTS idx_validation_outcome_recompute ON validation_outcome_metadata(should_recompute_state, affected_scope, affected_scope_id, updated_at);
+
 CREATE TABLE IF NOT EXISTS object_conflict_keys (
 	object_id TEXT NOT NULL,
 	conflict_group TEXT NOT NULL,
@@ -173,6 +186,22 @@ CREATE TABLE IF NOT EXISTS object_sources (
 
 func (s *Store) bootstrapSchema(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO validation_outcome_metadata
+		(object_id, affected_scope, affected_scope_id,
+		 should_republish, should_recompute_state, updated_at)
+		SELECT object_id, '', '',
+		       CASE validation_status
+		         WHEN 'valid' THEN 1
+		         WHEN 'valid_for_tally' THEN 1
+		         WHEN 'valid_but_conflicted' THEN 1
+		         ELSE 0
+		       END,
+		       0,
+		       last_checked_at
+		FROM validation_records
+		WHERE object_id NOT IN (SELECT object_id FROM validation_outcome_metadata)`); err != nil {
 		return err
 	}
 	return nil

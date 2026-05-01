@@ -114,10 +114,8 @@ func (s *Store) RevalidateRetainedObject(ctx context.Context, objectID string, i
 }
 
 func (s *Store) persistRevalidationOutcome(ctx context.Context, outcome validation.Outcome, input validation.PersistenceInput) error {
-	stored := outcome
-	stored.ShouldRepublish = false
 	return s.ApplyValidationOutcome(ctx, ApplyValidationOutcomeInput{
-		Outcome:          stored,
+		Outcome:          outcome,
 		ValidatorVersion: input.ValidatorVersion,
 		CheckedAt:        input.CheckedAt,
 	})
