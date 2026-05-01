@@ -482,6 +482,10 @@ func TestContextualValidatorTrusteeConsentValidatesSignature(t *testing.T) {
 	if outcome.Status != StatusValid {
 		t.Fatalf("outcome = %+v, want valid consent", outcome)
 	}
+	wantConsentConflicts := trusteeConsentConflictKeys(inputs.Consents[0].Payload)
+	if !sameConflictKeys(outcome.ConflictKeys, wantConsentConflicts) {
+		t.Fatalf("consent conflict keys = %+v, want %+v", outcome.ConflictKeys, wantConsentConflicts)
+	}
 
 	bad := inputs.Consents[0].Payload
 	bad.Signature = append([]byte(nil), bad.Signature...)
@@ -510,6 +514,10 @@ func TestContextualValidatorTallyKeyContributionValidatesFinalSetAndSignature(t 
 	if outcome.Status != StatusValid {
 		t.Fatalf("outcome = %+v, want unrelated pending consent ignored", outcome)
 	}
+	wantContributionConflicts := tallyKeyContributionConflictKeys(inputs.Contributions[0].Payload)
+	if !sameConflictKeys(outcome.ConflictKeys, wantContributionConflicts) {
+		t.Fatalf("contribution conflict keys = %+v, want %+v", outcome.ConflictKeys, wantContributionConflicts)
+	}
 
 	badShares := inputs.Contributions[0].Payload
 	badShares.DKGEncryptedShares = append([]domain.DKGEncryptedShare(nil), badShares.DKGEncryptedShares...)
@@ -535,6 +543,18 @@ func TestContextualValidatorTallyKeyContributionValidatesFinalSetAndSignature(t 
 }
 
 func sameDependencies(got, want []Dependency) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameConflictKeys(got, want []ConflictKey) bool {
 	if len(got) != len(want) {
 		return false
 	}

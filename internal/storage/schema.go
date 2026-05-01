@@ -42,6 +42,18 @@ CREATE TABLE IF NOT EXISTS validation_records (
 CREATE INDEX IF NOT EXISTS idx_validation_status_checked ON validation_records(validation_status, last_checked_at);
 CREATE INDEX IF NOT EXISTS idx_validation_version ON validation_records(validator_version);
 
+CREATE TABLE IF NOT EXISTS object_conflict_keys (
+	object_id TEXT NOT NULL,
+	conflict_group TEXT NOT NULL,
+	conflict_key TEXT NOT NULL,
+	base_validation_status TEXT NOT NULL CHECK(base_validation_status IN ('valid', 'valid_for_tally')),
+	PRIMARY KEY(object_id, conflict_group, conflict_key),
+	FOREIGN KEY(object_id) REFERENCES objects(object_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_conflict_keys_group_key ON object_conflict_keys(conflict_group, conflict_key, object_id);
+CREATE INDEX IF NOT EXISTS idx_conflict_keys_object ON object_conflict_keys(object_id);
+
 CREATE TABLE IF NOT EXISTS object_dependencies (
 	object_id TEXT NOT NULL,
 	dependency_type TEXT NOT NULL,

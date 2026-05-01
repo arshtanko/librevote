@@ -536,6 +536,38 @@ func TestFKOrphanObjectDependenciesRejected(t *testing.T) {
 	}
 }
 
+func TestObjectConflictKeysBaseStatusCheck(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, Config{DataDir: t.TempDir(), NetworkID: "testnet"})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+
+	oid := "test-object-conflict-status-check"
+	insertTestObject(t, ctx, store.db, oid)
+
+	validStatuses := []string{"valid", "valid_for_tally"}
+	for _, status := range validStatuses {
+		_, err := store.db.ExecContext(ctx,
+			"INSERT INTO object_conflict_keys(object_id, conflict_group, conflict_key, base_validation_status) VALUES (?, ?, ?, ?)",
+			oid, "group", "key-"+status, status)
+		if err != nil {
+			t.Fatalf("insert object_conflict_keys with base status %q: %v", status, err)
+		}
+	}
+
+	invalidStatuses := []string{"pending_dependencies", "pending_payload_evicted", "valid_but_conflicted", "invalid"}
+	for _, status := range invalidStatuses {
+		_, err := store.db.ExecContext(ctx,
+			"INSERT INTO object_conflict_keys(object_id, conflict_group, conflict_key, base_validation_status) VALUES (?, ?, ?, ?)",
+			oid, "group", "bad-key-"+status, status)
+		if err == nil {
+			t.Fatalf("insert object_conflict_keys with base status %q succeeded, want CHECK violation", status)
+		}
+	}
+}
+
 func TestFKOrphanObjectSourcesRejected(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, Config{DataDir: t.TempDir(), NetworkID: "testnet"})

@@ -46,6 +46,7 @@ type ContextualRuleResult struct {
 	ValidationErrorCode   string
 	ValidationErrorReason string
 	RequiredDependencies  []RequiredDependency
+	ConflictKeys          []ConflictKey
 }
 
 // ContextualOption customizes ContextualValidator construction.
@@ -126,6 +127,7 @@ func (v *DefaultContextualValidator) ValidateContext(ctx context.Context, envelo
 	outcome := NewOutcome(envelope.ObjectID, result.Status)
 	outcome.ValidationErrorCode = result.ValidationErrorCode
 	outcome.ValidationErrorReason = result.ValidationErrorReason
+	outcome.ConflictKeys = append([]ConflictKey(nil), result.ConflictKeys...)
 	return outcome, nil
 }
 

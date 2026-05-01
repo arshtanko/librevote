@@ -16,6 +16,12 @@ import (
 
 const ErrorTallyKeySetActivationMismatch = "tally_key_set_activation_mismatch"
 
+const (
+	TrusteeConsentConflictGroup           = "trustee_consent_conflict_key"
+	TrusteeConsentTallySetupConflictGroup = "trustee_consent_tally_setup_conflict_key"
+	TallyKeyContributionConflictGroup     = "tally_key_contribution_conflict_key"
+)
+
 func TrusteeConsentDependencyID(electionID string, trusteePublicKey []byte) string {
 	if len(trusteePublicKey) == 0 {
 		return electionID
@@ -148,7 +154,7 @@ func verifyTrusteeConsent(envelope domain.ObjectEnvelope, payload domain.Trustee
 			if !verifyPayloadSignature(envelope, crypto.DomainTrusteeConsentSign, 9, payload.TrusteePublicKey, payload.Signature) {
 				return invalidTallyKeySet("trustee consent signature is invalid")
 			}
-			return ContextualRuleResult{Status: StatusValid}
+			return ContextualRuleResult{Status: StatusValid, ConflictKeys: trusteeConsentConflictKeys(payload)}
 		}
 	}
 	return invalidTallyKeySet("trustee consent trustee is not in candidate ranking")
@@ -204,7 +210,18 @@ func verifyTallyKeyContribution(envelope domain.ObjectEnvelope, payload domain.T
 	if !verifyPayloadSignature(envelope, crypto.DomainTallyKeyContributionSign, 7, payload.TrusteePublicKey, payload.Signature) {
 		return invalidTallyKeySet("tally key contribution signature is invalid")
 	}
-	return ContextualRuleResult{Status: StatusValid}
+	return ContextualRuleResult{Status: StatusValid, ConflictKeys: tallyKeyContributionConflictKeys(payload)}
+}
+
+func trusteeConsentConflictKeys(payload domain.TrusteeConsentPayload) []ConflictKey {
+	return []ConflictKey{
+		{Group: TrusteeConsentConflictGroup, Key: payload.ElectionID + "|" + hex.EncodeToString(payload.TrusteePublicKey)},
+		{Group: TrusteeConsentTallySetupConflictGroup, Key: payload.ElectionID + "|" + hex.EncodeToString(payload.TrusteeTallySetupPublicKey)},
+	}
+}
+
+func tallyKeyContributionConflictKeys(payload domain.TallyKeyContributionPayload) []ConflictKey {
+	return []ConflictKey{{Group: TallyKeyContributionConflictGroup, Key: payload.ElectionID + "|" + hex.EncodeToString(payload.TrusteePublicKey)}}
 }
 
 func verifyTallyKeySet(envelope domain.ObjectEnvelope, payload domain.TallyKeySetPayload, inputs TallyKeySetInputs) ContextualRuleResult {

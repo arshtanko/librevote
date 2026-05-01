@@ -32,9 +32,6 @@ func (s *Store) ApplyValidationOutcome(ctx context.Context, input ApplyValidatio
 	if input.CheckedAt <= 0 {
 		return errors.New("checked_at must be greater than zero")
 	}
-	if len(input.Outcome.ConflictKeys) > 0 {
-		return errors.New("validation outcome conflict keys are not supported by storage schema")
-	}
 	if input.Outcome.AffectedScope.Scope != "" || input.Outcome.AffectedScope.ScopeID != "" {
 		return errors.New("validation outcome affected scope is not supported by storage schema")
 	}
@@ -65,6 +62,11 @@ func (s *Store) ApplyValidationOutcome(ctx context.Context, input ApplyValidatio
 		return fmt.Errorf("read object metadata: %w", err)
 	}
 
+	oldConflicts, err := conflictMetadataForObjectTx(ctx, tx, input.Outcome.ObjectID)
+	if err != nil {
+		return err
+	}
+
 	if err := applyOutcomeRetention(ctx, tx, input.Outcome); err != nil {
 		return err
 	}
@@ -91,6 +93,16 @@ func (s *Store) ApplyValidationOutcome(ctx context.Context, input ApplyValidatio
 	if err := replaceDependencies(ctx, tx, input.Outcome.ObjectID, outcomeDomainStatus(input.Outcome.Status), outcomeDependencies(input.Outcome.Dependencies)); err != nil {
 		return err
 	}
+	newConflicts := conflictsForOutcome(input.Outcome)
+	if err := validateConflictMetadata(input.Outcome.ObjectID, newConflicts); err != nil {
+		return err
+	}
+	if err := replaceConflictMetadataTx(ctx, tx, input.Outcome.ObjectID, newConflicts); err != nil {
+		return err
+	}
+	if err := classifyPersistedConflictsTx(ctx, tx, append(oldConflicts, newConflicts...)); err != nil {
+		return err
+	}
 
 	if input.Outcome.Status == validation.StatusInvalid {
 		if _, err := tx.ExecContext(ctx,
@@ -109,6 +121,22 @@ func (s *Store) ApplyValidationOutcome(ctx context.Context, input ApplyValidatio
 	}
 
 	return tx.Commit()
+}
+
+func conflictsForOutcome(outcome validation.Outcome) []ConflictMetadata {
+	if !persistConflictKeysForStatus(outcome.Status) {
+		return nil
+	}
+	return conflictMetadataFromValidation(outcome.ObjectID, outcome.ConflictKeys)
+}
+
+func persistConflictKeysForStatus(status validation.Status) bool {
+	switch status {
+	case validation.StatusValid, validation.StatusValidForTally, validation.StatusValidButConflicted:
+		return true
+	default:
+		return false
+	}
 }
 
 func applyOutcomeRetention(ctx context.Context, tx *sql.Tx, outcome validation.Outcome) error {

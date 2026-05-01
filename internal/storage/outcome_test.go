@@ -115,7 +115,7 @@ func TestApplyValidationOutcomePendingDependenciesReplacesDependencyRows(t *test
 	}
 }
 
-func TestApplyValidationOutcomeRejectsUnsupportedConflictKeys(t *testing.T) {
+func TestApplyValidationOutcomePersistsConflictKeys(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, Config{DataDir: t.TempDir(), NetworkID: "testnet"})
 	if err != nil {
@@ -128,10 +128,17 @@ func TestApplyValidationOutcomeRejectsUnsupportedConflictKeys(t *testing.T) {
 		t.Fatalf("IngestObject() error = %v", err)
 	}
 
-	outcome := validation.Outcome{ObjectID: input.ObjectID, Status: validation.StatusValidButConflicted}
+	outcome := validation.Outcome{ObjectID: input.ObjectID, Status: validation.StatusValid}
 	outcome.ConflictKeys = []validation.ConflictKey{{Group: "anonymous_ballot_conflict_key", Key: "election-1|nullifier-1"}}
-	if err := store.ApplyValidationOutcome(ctx, ApplyValidationOutcomeInput{Outcome: outcome, ValidatorVersion: "v2", CheckedAt: 7000}); err == nil || !strings.Contains(err.Error(), "conflict keys") {
-		t.Fatalf("ApplyValidationOutcome() error = %v, want conflict keys error", err)
+	if err := store.ApplyValidationOutcome(ctx, ApplyValidationOutcomeInput{Outcome: outcome, ValidatorVersion: "v2", CheckedAt: 7000}); err != nil {
+		t.Fatalf("ApplyValidationOutcome() error = %v", err)
+	}
+	conflicts, err := store.ConflictMetadataForObject(ctx, input.ObjectID)
+	if err != nil {
+		t.Fatalf("ConflictMetadataForObject() error = %v", err)
+	}
+	if len(conflicts) != 1 || conflicts[0].Group != outcome.ConflictKeys[0].Group || conflicts[0].Key != outcome.ConflictKeys[0].Key {
+		t.Fatalf("conflicts = %+v", conflicts)
 	}
 }
 

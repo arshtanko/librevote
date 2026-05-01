@@ -26,9 +26,6 @@ func (s *Store) PersistEnvelopeValidationOutcome(ctx context.Context, envelope d
 	if !outcome.Status.Valid() {
 		return validation.PersistenceResult{}, fmt.Errorf("unknown validation status %q", outcome.Status)
 	}
-	if len(outcome.ConflictKeys) > 0 {
-		return validation.PersistenceResult{}, errors.New("conflict keys are not supported by envelope persistence")
-	}
 	if outcome.AffectedScope.Scope != "" || outcome.AffectedScope.ScopeID != "" {
 		return validation.PersistenceResult{}, errors.New("affected scope is not supported by envelope persistence")
 	}
@@ -60,6 +57,7 @@ func (s *Store) PersistEnvelopeValidationOutcome(ctx context.Context, envelope d
 		ValidationErrorMessage: outcome.ValidationErrorReason,
 		ValidatorVersion:       input.ValidatorVersion,
 		Dependencies:           runnerDependencies(outcome.Dependencies),
+		ConflictKeys:           conflictMetadataFromValidation(outcome.ObjectID, outcome.ConflictKeys),
 		SeenAt:                 input.SeenAt,
 		CheckedAt:              input.CheckedAt,
 	})

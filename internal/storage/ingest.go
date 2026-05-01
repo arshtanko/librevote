@@ -46,6 +46,7 @@ type IngestObjectInput struct {
 	ValidationErrorMessage string
 	ValidatorVersion       string
 	Dependencies           []Dependency
+	ConflictKeys           []ConflictMetadata
 	SeenAt                 int64
 	CheckedAt              int64
 }
@@ -252,6 +253,16 @@ func (s *Store) IngestObject(ctx context.Context, input IngestObjectInput) (Inge
 			if err := replaceDependencies(ctx, tx, input.ObjectID, input.ValidationStatus, input.Dependencies); err != nil {
 				return result, err
 			}
+			conflicts := conflictsForDomainStatus(input.ObjectID, input.ValidationStatus, input.ConflictKeys)
+			if err := validateConflictMetadata(input.ObjectID, conflicts); err != nil {
+				return result, err
+			}
+			if err := replaceConflictMetadataTx(ctx, tx, input.ObjectID, conflicts); err != nil {
+				return result, err
+			}
+			if err := classifyPersistedConflictsTx(ctx, tx, conflicts); err != nil {
+				return result, err
+			}
 
 			result.Reacquired = true
 			result.Updated = true
@@ -294,6 +305,16 @@ func (s *Store) IngestObject(ctx context.Context, input IngestObjectInput) (Inge
 		}
 
 		if err := replaceDependencies(ctx, tx, input.ObjectID, input.ValidationStatus, input.Dependencies); err != nil {
+			return result, err
+		}
+		conflicts := conflictsForDomainStatus(input.ObjectID, input.ValidationStatus, input.ConflictKeys)
+		if err := validateConflictMetadata(input.ObjectID, conflicts); err != nil {
+			return result, err
+		}
+		if err := replaceConflictMetadataTx(ctx, tx, input.ObjectID, conflicts); err != nil {
+			return result, err
+		}
+		if err := classifyPersistedConflictsTx(ctx, tx, conflicts); err != nil {
 			return result, err
 		}
 
@@ -374,6 +395,11 @@ func (s *Store) EvictPendingPayload(ctx context.Context, objectID string, checke
 		"DELETE FROM object_dependencies WHERE object_id = ?",
 		objectID); err != nil {
 		return fmt.Errorf("delete object_dependencies: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM object_conflict_keys WHERE object_id = ?",
+		objectID); err != nil {
+		return fmt.Errorf("delete object_conflict_keys: %w", err)
 	}
 
 	return tx.Commit()
@@ -561,6 +587,20 @@ func replaceDependencies(ctx context.Context, tx *sql.Tx, objectID string, statu
 		}
 	}
 	return nil
+}
+
+func conflictsForDomainStatus(objectID string, status domain.ValidationStatus, conflicts []ConflictMetadata) []ConflictMetadata {
+	switch status {
+	case domain.ValidationStatusValid, domain.ValidationStatusValidForTally, domain.ValidationStatusValidButConflicted:
+		out := make([]ConflictMetadata, len(conflicts))
+		for i, conflict := range conflicts {
+			out[i] = conflict
+			out[i].ObjectID = objectID
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // InvalidObjectRecord mirrors the invalid_object_records table row.
