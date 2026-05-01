@@ -81,12 +81,38 @@ func (s *Service) Close() error {
 	return s.store.Close()
 }
 
+// ListServableObjectRefs returns sync inventory items for locally retained
+// objects with servable validation statuses. It delegates to the storage layer.
+func (s *Service) ListServableObjectRefs(ctx context.Context, scope string, scopeID string, objectTypes []string) ([]storage.ObjectRef, error) {
+	return s.store.ListServableObjectRefs(ctx, scope, scopeID, objectTypes)
+}
+
+// LoadObjectEnvelope reconstructs a full domain object envelope for a retained
+// and servable object. It delegates to the storage layer.
+func (s *Service) LoadObjectEnvelope(ctx context.Context, objectID string) (domain.ObjectEnvelope, error) {
+	return s.store.LoadObjectEnvelope(ctx, objectID)
+}
+
 func (s *Service) ValidationStatus(ctx context.Context, objectID string) (validation.Status, bool, error) {
 	return s.store.ValidationStatus(ctx, objectID)
 }
 
 func (s *Service) IngestEnvelope(ctx context.Context, envelope domain.ObjectEnvelope) (validation.RunnerResult, error) {
 	return s.runner.IngestAndValidate(ctx, envelope)
+}
+
+// IngestSyncEnvelope ingests a received envelope and returns only the error.
+// It satisfies the sync.EnvelopeIngester interface for P2P sync.
+func (s *Service) IngestSyncEnvelope(ctx context.Context, envelope domain.ObjectEnvelope) error {
+	_, err := s.runner.IngestAndValidate(ctx, envelope)
+	return err
+}
+
+// EvictPendingPayload delegates to the storage layer to evict a pending
+// object's retained payload. The object must have a pending_dependencies or
+// pending_payload_evicted status.
+func (s *Service) EvictPendingPayload(ctx context.Context, objectID string, checkedAt int64, validatorVersion string) error {
+	return s.store.EvictPendingPayload(ctx, objectID, checkedAt, validatorVersion)
 }
 
 func (s *Service) CreateTrusteeSelectionElection(ctx context.Context, payload domain.TrusteeSelectionElectionPayload, creatorPrivKey ed25519.PrivateKey, createdAt int64) (domain.ObjectEnvelope, error) {

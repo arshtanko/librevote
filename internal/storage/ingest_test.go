@@ -427,7 +427,8 @@ func TestDependencyReplacementAndRemoval(t *testing.T) {
 		t.Fatalf("first ingest error = %v", err)
 	}
 
-	// Duplicate retained delivery must not mutate dependencies.
+	// Re-ingestion of a pending object with updated dependencies replaces them
+	// so that the latest validation outcome is reflected.
 	input.Dependencies = []Dependency{
 		{Type: "election", ID: "election-2"},
 	}
@@ -435,22 +436,19 @@ func TestDependencyReplacementAndRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second ingest error = %v", err)
 	}
-	if !res.Duplicate {
-		t.Fatalf("expected Duplicate=true, got %+v", res)
+	if !res.Reacquired || !res.Updated {
+		t.Fatalf("expected Reacquired=true and Updated=true, got %+v", res)
 	}
 
 	deps, err := store.Dependencies(ctx, input.ObjectID)
 	if err != nil {
 		t.Fatalf("Dependencies() error = %v", err)
 	}
-	if len(deps) != 2 {
-		t.Fatalf("dependency count after duplicate = %d, want 2", len(deps))
+	if len(deps) != 1 {
+		t.Fatalf("dependency count after update = %d, want 1", len(deps))
 	}
-	want := map[string]string{"election": "election-1", "trustee_selection": "ts-1"}
-	for _, dep := range deps {
-		if want[dep.Type] != dep.ID {
-			t.Fatalf("dependencies mutated by duplicate delivery: %+v", deps)
-		}
+	if deps[0].Type != "election" || deps[0].ID != "election-2" {
+		t.Fatalf("dependencies not updated: %+v", deps)
 	}
 
 	// Evict and reacquire as valid: dependencies should be removed.
@@ -608,7 +606,7 @@ func TestEvictPendingPayloadRejectsFinalStatuses(t *testing.T) {
 	}
 }
 
-func TestDuplicateDoesNotMutateValidationOrDependencies(t *testing.T) {
+func TestPendingObjectTransitionsToValidOnReingest(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, Config{DataDir: t.TempDir(), NetworkID: "testnet"})
 	if err != nil {
@@ -633,30 +631,30 @@ func TestDuplicateDoesNotMutateValidationOrDependencies(t *testing.T) {
 	input.CheckedAt = 6000
 	res, err := store.IngestObject(ctx, input)
 	if err != nil {
-		t.Fatalf("duplicate ingest error = %v", err)
+		t.Fatalf("second ingest error = %v", err)
 	}
-	if !res.Duplicate {
-		t.Fatalf("expected Duplicate=true, got %+v", res)
+	if !res.Reacquired || !res.Updated {
+		t.Fatalf("expected Reacquired=true and Updated=true for pending->valid transition, got %+v", res)
 	}
 
 	vr, err := store.ValidationRecord(ctx, input.ObjectID)
 	if err != nil {
 		t.Fatalf("ValidationRecord() error = %v", err)
 	}
-	if vr.ValidationStatus != string(domain.ValidationStatusPendingDependencies) ||
-		vr.ValidationErrorCode != "FIRST" ||
-		vr.ValidationErrorMessage != "first" ||
-		vr.ValidatorVersion != "v1" ||
-		vr.LastCheckedAt != 3000 {
-		t.Fatalf("validation record mutated by duplicate: %+v", vr)
+	if vr.ValidationStatus != string(domain.ValidationStatusValid) ||
+		vr.ValidationErrorCode != "SECOND" ||
+		vr.ValidationErrorMessage != "second" ||
+		vr.ValidatorVersion != "v2" ||
+		vr.LastCheckedAt != 6000 {
+		t.Fatalf("validation record not updated on pending->valid transition: %+v", vr)
 	}
 
 	deps, err := store.Dependencies(ctx, input.ObjectID)
 	if err != nil {
 		t.Fatalf("Dependencies() error = %v", err)
 	}
-	if len(deps) != 1 || deps[0].Type != "election" || deps[0].ID != "election-1" {
-		t.Fatalf("dependencies mutated by duplicate: %+v", deps)
+	if len(deps) != 0 {
+		t.Fatalf("dependencies should be removed after becoming valid: %+v", deps)
 	}
 }
 

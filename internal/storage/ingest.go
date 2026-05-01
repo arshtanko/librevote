@@ -153,8 +153,9 @@ func (s *Store) IngestObject(ctx context.Context, input IngestObjectInput) (Inge
 
 	// Fast path: retained existing object with matching payload is a duplicate.
 	// Only last_seen_at is updated; validation record and dependencies are untouched.
-	// Pending objects may still be rechecked as invalid by the validation layer.
-	if objExists && payloadRetained == 1 && !(input.ValidationStatus == domain.ValidationStatusInvalid && existingStatus == string(domain.ValidationStatusPendingDependencies)) {
+	// Pending objects are not treated as duplicates so that re-ingestion after
+	// dependency arrival can update validation status through the normal path.
+	if objExists && payloadRetained == 1 && existingStatus != string(domain.ValidationStatusPendingDependencies) {
 		if len(input.PayloadBytes) > 0 {
 			if !bytes.Equal(payloadHash, existingPayloadHash) {
 				return result, ErrPayloadMismatch
@@ -241,7 +242,7 @@ func (s *Store) IngestObject(ctx context.Context, input IngestObjectInput) (Inge
 			}
 
 			if _, err := tx.ExecContext(ctx,
-				"INSERT INTO object_payloads(object_id, payload_bytes) VALUES (?, ?)",
+				"INSERT OR IGNORE INTO object_payloads(object_id, payload_bytes) VALUES (?, ?)",
 				input.ObjectID, input.PayloadBytes); err != nil {
 				return result, fmt.Errorf("restore object_payloads: %w", err)
 			}
