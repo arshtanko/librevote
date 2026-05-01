@@ -191,6 +191,7 @@ func TestKnownEd25519SigningDomain(t *testing.T) {
 	known := []Domain{
 		DomainTrusteeNominationSign,
 		DomainTrusteeVoteSign,
+		DomainTrusteeSelectionElectionSign,
 		DomainTrusteeConsentSign,
 		DomainTallyKeyContributionSign,
 		DomainTallyKeySetSign,

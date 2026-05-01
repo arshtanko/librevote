@@ -546,6 +546,9 @@ func validateTrusteeVote(p TrusteeVotePayload) error {
 	if p.TrusteeSelectionID == "" {
 		return errors.New("required trustee vote fields are missing")
 	}
+	if len(p.SelectedCandidateKeys) == 0 {
+		return errors.New("trustee vote must select at least one candidate")
+	}
 	if len(p.SelectedCandidateKeys) > MaxChoicesPerVoteV1 {
 		return errors.New("too many trustee vote choices")
 	}
@@ -1006,4 +1009,129 @@ func increasing(values ...int64) bool {
 		previous = value
 	}
 	return true
+}
+
+type domainPayloadBuilder struct{ bytes.Buffer }
+
+func (b *domainPayloadBuilder) stringField(field uint64, value string) {
+	b.bytesField(field, []byte(value))
+}
+
+func (b *domainPayloadBuilder) bytesField(field uint64, value []byte) {
+	if len(value) == 0 {
+		return
+	}
+	writeProtoBytes(&b.Buffer, field, value)
+}
+
+func (b *domainPayloadBuilder) int64Field(field uint64, value int64) {
+	if value == 0 {
+		return
+	}
+	writeProtoInt64(&b.Buffer, field, value)
+}
+
+func (b *domainPayloadBuilder) subMessageField(field uint64, msg []byte) {
+	if len(msg) == 0 {
+		return
+	}
+	writeProtoBytes(&b.Buffer, field, msg)
+}
+
+func encodeVoterEntry(entry VoterEntry) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, entry.VoterID)
+	b.bytesField(2, entry.VoterSigningPublicKey)
+	b.bytesField(3, entry.VoterEncryptionPublicKey)
+	return b.Bytes()
+}
+
+func EncodeTrusteeSelectionElectionPayload(p TrusteeSelectionElectionPayload) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, p.TrusteeSelectionID)
+	b.stringField(2, p.NetworkID)
+	b.stringField(3, p.Title)
+	b.stringField(4, p.Description)
+	for _, entry := range p.VoterAllowlist {
+		b.subMessageField(5, encodeVoterEntry(entry))
+	}
+	b.int64Field(6, p.NominationStartsAt)
+	b.int64Field(7, p.NominationEndsAt)
+	b.int64Field(8, p.VotingStartsAt)
+	b.int64Field(9, p.VotingEndsAt)
+	b.int64Field(10, p.ConsentStartsAt)
+	b.int64Field(11, p.ConsentEndsAt)
+	b.int64Field(12, p.TrusteeCountN)
+	b.int64Field(13, p.ThresholdT)
+	b.int64Field(14, p.MaxChoicesPerVote)
+	b.bytesField(15, p.CreatorPublicKey)
+	b.bytesField(16, p.Signature)
+	return b.Bytes()
+}
+
+func TrusteeSelectionElectionSignatureField() uint64 { return 16 }
+
+func EncodeTrusteeNominationPayload(p TrusteeNominationPayload) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, p.TrusteeSelectionID)
+	b.bytesField(2, p.CandidatePublicKey)
+	b.bytesField(3, p.CandidateBlindTokenPublicKey)
+	b.stringField(4, p.CandidateNodePeerID)
+	b.stringField(5, p.Statement)
+	b.bytesField(6, p.Signature)
+	return b.Bytes()
+}
+
+func TrusteeNominationSignatureField() uint64 { return 6 }
+
+func EncodeTrusteeVotePayload(p TrusteeVotePayload) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, p.TrusteeSelectionID)
+	b.bytesField(2, p.VoterPublicKey)
+	for _, key := range p.SelectedCandidateKeys {
+		b.bytesField(3, key)
+	}
+	b.bytesField(4, p.Signature)
+	return b.Bytes()
+}
+
+func TrusteeVoteSignatureField() uint64 { return 4 }
+
+func encodeTrusteeCandidate(candidate TrusteeCandidate, includeSetup bool) []byte {
+	var b domainPayloadBuilder
+	b.bytesField(1, candidate.TrusteePublicKey)
+	b.bytesField(2, candidate.BlindTokenPublicKey)
+	if includeSetup && len(candidate.TrusteeTallySetupKey) > 0 {
+		b.bytesField(3, candidate.TrusteeTallySetupKey)
+	}
+	return b.Bytes()
+}
+
+func encodeCandidateScore(score CandidateScore) []byte {
+	var b domainPayloadBuilder
+	b.bytesField(1, score.TrusteePublicKey)
+	b.int64Field(2, score.Score)
+	return b.Bytes()
+}
+
+func EncodeTrusteeSelectionResultPayload(p TrusteeSelectionResultPayload) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, p.TrusteeSelectionID)
+	for _, candidate := range p.CandidateRanking {
+		b.subMessageField(2, encodeTrusteeCandidate(candidate, false))
+	}
+	for _, candidate := range p.InitialSelectedTrustees {
+		b.subMessageField(3, encodeTrusteeCandidate(candidate, false))
+	}
+	b.int64Field(4, p.ThresholdT)
+	b.int64Field(5, p.TrusteeCountN)
+	for _, score := range p.CandidateScores {
+		b.subMessageField(6, encodeCandidateScore(score))
+	}
+	b.int64Field(7, p.ConflictedVoteCount)
+	b.int64Field(8, p.ValidVoteCount)
+	b.bytesField(9, p.ResultHash)
+	b.bytesField(10, p.ReporterPublicKey)
+	b.bytesField(11, p.Signature)
+	return b.Bytes()
 }

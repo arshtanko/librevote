@@ -92,6 +92,17 @@ func TestDecodePayloadRejectsExplicitDefaultRepresentations(t *testing.T) {
 	}
 }
 
+func TestValidateTrusteeVoteRejectsZeroCandidates(t *testing.T) {
+	payload := validTrusteeVotePayloadFixture(0)
+	if err := ValidatePayloadShape(ObjectTypeTrusteeVote, payload); err == nil {
+		t.Fatal("ValidatePayloadShape() error = nil, want zero candidate rejection")
+	}
+	payloadWithMax := validTrusteeVotePayloadFixture(MaxChoicesPerVoteV1)
+	if err := ValidatePayloadShape(ObjectTypeTrusteeVote, payloadWithMax); err != nil {
+		t.Fatalf("ValidatePayloadShape() error = %v", err)
+	}
+}
+
 func TestValidateTallyKeySetRejectsDuplicateTrustees(t *testing.T) {
 	payload := validTallyKeySetPayloadFixture(true)
 	if err := ValidatePayloadShape(ObjectTypeTallyKeySet, payload); err == nil {
@@ -294,6 +305,17 @@ func writeTallyKeySetPayload(b *payloadBuilder, duplicateTrustee bool, includeAc
 	b.bytesField(12, repeatedByte(0x44, hashSize))
 	b.bytesField(13, repeatedByte(0x45, ed25519PublicKeySize))
 	b.bytesField(14, repeatedByte(0x46, ed25519SignatureSize))
+}
+
+func validTrusteeVotePayloadFixture(candidates int) []byte {
+	var b payloadBuilder
+	b.stringField(1, "selection-1")
+	b.bytesField(2, repeatedByte(0x10, ed25519PublicKeySize))
+	for i := 0; i < candidates; i++ {
+		b.bytesField(3, repeatedByte(0x50+byte(i+1), ed25519PublicKeySize))
+	}
+	b.bytesField(4, repeatedByte(0x20, ed25519SignatureSize))
+	return b.Bytes()
 }
 
 func validVoterEntry(index byte) VoterEntry {

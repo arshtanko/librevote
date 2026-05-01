@@ -63,6 +63,19 @@ func (s *Store) DependencyStatus(ctx context.Context, dep validation.Dependency)
 			return "", false, err
 		}
 		return s.statusForTrusteeSelectionResult(ctx, selectionID, resultHash)
+	case "trustee_nomination":
+		selectionID, candidateKey, err := validation.ParseTrusteeNominationDependencyID(dep.ID)
+		if err != nil {
+			return "", false, err
+		}
+		return s.statusForDecodedPayload(ctx, domain.ObjectTypeTrusteeNomination, func(payload []byte) (bool, error) {
+			decoded, err := domain.DecodePayload(domain.ObjectTypeTrusteeNomination, payload)
+			if err != nil {
+				return false, err
+			}
+			nomination := decoded.(domain.TrusteeNominationPayload)
+			return nomination.TrusteeSelectionID == selectionID && bytes.Equal(nomination.CandidatePublicKey, candidateKey), nil
+		})
 	case "trustee_consent":
 		return s.statusForTrusteeConsentDependency(ctx, dep.ID)
 	case "tally_key_contribution":
@@ -152,6 +165,23 @@ func (s *Store) statusForTrusteeSelectionID(ctx context.Context, selectionID str
 		election := decoded.(domain.TrusteeSelectionElectionPayload)
 		return election.TrusteeSelectionID == selectionID, nil
 	})
+}
+
+func (s *Store) TrusteeSelectionElectionByID(ctx context.Context, selectionID string) (domain.TrusteeSelectionElectionPayload, validation.Status, bool, error) {
+	var out domain.TrusteeSelectionElectionPayload
+	status, found, err := s.payloadForDecodedPayload(ctx, domain.ObjectTypeTrusteeSelectionElection, func(payload []byte) (bool, error) {
+		decoded, err := domain.DecodePayload(domain.ObjectTypeTrusteeSelectionElection, payload)
+		if err != nil {
+			return false, err
+		}
+		election := decoded.(domain.TrusteeSelectionElectionPayload)
+		if election.TrusteeSelectionID != selectionID {
+			return false, nil
+		}
+		out = election
+		return true, nil
+	})
+	return out, status, found, err
 }
 
 func (s *Store) statusForAnonymousElectionID(ctx context.Context, electionID string) (validation.Status, bool, error) {

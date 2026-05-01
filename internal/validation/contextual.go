@@ -184,6 +184,8 @@ func defaultContextualRules(store ContextualStore) map[domain.ObjectType]Context
 	}
 	return map[domain.ObjectType]ContextualRule{
 		domain.ObjectTypeTrusteeSelectionElection: root,
+		domain.ObjectTypeTrusteeNomination:        contextualTrusteeNomination(store),
+		domain.ObjectTypeTrusteeVote:              contextualTrusteeVote(store),
 		domain.ObjectTypeTrusteeSelectionResult:   contextualTrusteeSelectionResult(store),
 		domain.ObjectTypeAnonymousElection:        contextualAnonymousElection,
 		domain.ObjectTypeTrusteeConsent:           contextualTrusteeConsent(store),

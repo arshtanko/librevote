@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 
 	"librevote/internal/crypto"
 	"librevote/internal/domain"
@@ -115,7 +116,7 @@ func verifyTrusteeSelectionResult(result domain.TrusteeSelectionResultPayload, i
 		return ContextualRuleResult{Status: StatusPendingDependencies, RequiredDependencies: requiredDependencies(missing, StatusValid)}
 	}
 
-	computed, err := recomputeTrusteeSelectionResult(result.TrusteeSelectionID, validNominations, inputs.Votes)
+	computed, err := RecomputeTrusteeSelectionResult(result.TrusteeSelectionID, validNominations, inputs.Votes)
 	if err != nil {
 		return invalidResult(err.Error())
 	}
@@ -128,7 +129,7 @@ func verifyTrusteeSelectionResult(result domain.TrusteeSelectionResultPayload, i
 	return ContextualRuleResult{Status: StatusValid}
 }
 
-func recomputeTrusteeSelectionResult(selectionID string, nominations map[string]domain.TrusteeNominationPayload, votes []TrusteeSelectionVoteInput) (domain.TrusteeSelectionResultPayload, error) {
+func RecomputeTrusteeSelectionResult(selectionID string, nominations map[string]domain.TrusteeNominationPayload, votes []TrusteeSelectionVoteInput) (domain.TrusteeSelectionResultPayload, error) {
 	scores := make(map[string]int64, len(nominations))
 	for key := range nominations {
 		scores[key] = 0
@@ -296,4 +297,119 @@ func TrusteeNominationDependencyID(selectionID string, candidatePublicKey []byte
 		return ""
 	}
 	return selectionID + ":" + hex.EncodeToString(candidatePublicKey)
+}
+
+func ParseTrusteeNominationDependencyID(id string) (string, []byte, error) {
+	selectionID, keyHex, ok := strings.Cut(id, ":")
+	if !ok || selectionID == "" || keyHex == "" {
+		return "", nil, fmt.Errorf("invalid trustee_nomination dependency id %q", id)
+	}
+	key, err := hex.DecodeString(keyHex)
+	if err != nil {
+		return "", nil, err
+	}
+	return selectionID, key, nil
+}
+
+type TrusteeSelectionElectionStore interface {
+	TrusteeSelectionElectionByID(context.Context, string) (domain.TrusteeSelectionElectionPayload, Status, bool, error)
+}
+
+func contextualTrusteeNomination(store ContextualStore) ContextualRule {
+	return func(ctx context.Context, envelope domain.ObjectEnvelope) (ContextualRuleResult, error) {
+		inputStore, ok := store.(TrusteeSelectionElectionStore)
+		if !ok {
+			return ContextualRuleResult{}, fmt.Errorf("%w for %s contextual validation", ErrContextualRuleUnsupported, envelope.ObjectType)
+		}
+		payload, err := decodePayload[domain.TrusteeNominationPayload](envelope)
+		if err != nil {
+			return ContextualRuleResult{}, err
+		}
+		if envelope.ScopeID != payload.TrusteeSelectionID {
+			return invalidResult("trustee nomination scope_id does not match payload trustee_selection_id"), nil
+		}
+		electionPayload, electionStatus, electionFound, err := inputStore.TrusteeSelectionElectionByID(ctx, payload.TrusteeSelectionID)
+		if err != nil {
+			return ContextualRuleResult{}, err
+		}
+		if !electionFound || !electionStatus.Final() {
+			return pendingResultDependency("trustee_selection", payload.TrusteeSelectionID), nil
+		}
+		if electionStatus != StatusValid {
+			return invalidResult("referenced trustee selection has status " + electionStatus.String()), nil
+		}
+		if envelope.CreatedAt < electionPayload.NominationStartsAt || envelope.CreatedAt > electionPayload.NominationEndsAt {
+			return invalidResult("trustee nomination created_at is not within nomination window"), nil
+		}
+		if !verifyPayloadSignature(envelope, crypto.DomainTrusteeNominationSign, domain.TrusteeNominationSignatureField(), payload.CandidatePublicKey, payload.Signature) {
+			return invalidResult("trustee nomination signature is invalid"), nil
+		}
+		return ContextualRuleResult{
+			Status: StatusValid,
+			ConflictKeys: []ConflictKey{
+				{Group: "trustee_nomination_candidate_conflict_key", Key: payload.TrusteeSelectionID + "|" + hex.EncodeToString(payload.CandidatePublicKey)},
+				{Group: "trustee_nomination_blind_token_conflict_key", Key: payload.TrusteeSelectionID + "|" + hex.EncodeToString(payload.CandidateBlindTokenPublicKey)},
+			},
+		}, nil
+	}
+}
+
+func contextualTrusteeVote(store ContextualStore) ContextualRule {
+	return func(ctx context.Context, envelope domain.ObjectEnvelope) (ContextualRuleResult, error) {
+		inputStore, ok := store.(TrusteeSelectionElectionStore)
+		if !ok {
+			return ContextualRuleResult{}, fmt.Errorf("%w for %s contextual validation", ErrContextualRuleUnsupported, envelope.ObjectType)
+		}
+		payload, err := decodePayload[domain.TrusteeVotePayload](envelope)
+		if err != nil {
+			return ContextualRuleResult{}, err
+		}
+		if envelope.ScopeID != payload.TrusteeSelectionID {
+			return invalidResult("trustee vote scope_id does not match payload trustee_selection_id"), nil
+		}
+		electionPayload, electionStatus, electionFound, err := inputStore.TrusteeSelectionElectionByID(ctx, payload.TrusteeSelectionID)
+		if err != nil {
+			return ContextualRuleResult{}, err
+		}
+		if !electionFound || !electionStatus.Final() {
+			return pendingResultDependency("trustee_selection", payload.TrusteeSelectionID), nil
+		}
+		if electionStatus != StatusValid {
+			return invalidResult("referenced trustee selection has status " + electionStatus.String()), nil
+		}
+		if envelope.CreatedAt < electionPayload.VotingStartsAt || envelope.CreatedAt > electionPayload.VotingEndsAt {
+			return invalidResult("trustee vote created_at is not within voting window"), nil
+		}
+		voterFound := false
+		for _, entry := range electionPayload.VoterAllowlist {
+			if bytes.Equal(entry.VoterSigningPublicKey, payload.VoterPublicKey) {
+				voterFound = true
+				break
+			}
+		}
+		if !voterFound {
+			return invalidResult("trustee vote voter is not in voter allowlist"), nil
+		}
+		deps := make([]RequiredDependency, 0, len(payload.SelectedCandidateKeys))
+		seenDeps := make(map[Dependency]struct{})
+		for _, candidateKey := range payload.SelectedCandidateKeys {
+			depID := TrusteeNominationDependencyID(payload.TrusteeSelectionID, candidateKey)
+			dep := Dependency{Type: "trustee_nomination", ID: depID}
+			if _, seen := seenDeps[dep]; seen {
+				continue
+			}
+			seenDeps[dep] = struct{}{}
+			deps = append(deps, RequireObject("trustee_nomination", depID, StatusValid))
+		}
+		if !verifyPayloadSignature(envelope, crypto.DomainTrusteeVoteSign, domain.TrusteeVoteSignatureField(), payload.VoterPublicKey, payload.Signature) {
+			return invalidResult("trustee vote signature is invalid"), nil
+		}
+		return ContextualRuleResult{
+			Status:               StatusValidForTally,
+			RequiredDependencies: deps,
+			ConflictKeys: []ConflictKey{
+				{Group: "trustee_vote_conflict_key", Key: payload.TrusteeSelectionID + "|" + hex.EncodeToString(payload.VoterPublicKey)},
+			},
+		}, nil
+	}
 }

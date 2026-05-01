@@ -998,9 +998,9 @@ func recomputedTrusteeSelectionResult(t *testing.T, inputs TrusteeSelectionInput
 			valid[string(nomination.Payload.CandidatePublicKey)] = nomination.Payload
 		}
 	}
-	result, err := recomputeTrusteeSelectionResult("selection-1", valid, inputs.Votes)
+	result, err := RecomputeTrusteeSelectionResult("selection-1", valid, inputs.Votes)
 	if err != nil {
-		t.Fatalf("recomputeTrusteeSelectionResult() error = %v", err)
+		t.Fatalf("RecomputeTrusteeSelectionResult() error = %v", err)
 	}
 	privateKey := ed25519.NewKeyFromSeed(repeatedContextByte(0x33, ed25519.SeedSize))
 	result.ReporterPublicKey = append([]byte(nil), privateKey.Public().(ed25519.PublicKey)...)
