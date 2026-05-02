@@ -2,9 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+
+	"librevote/internal/app"
+	"librevote/internal/transport"
 )
 
 func TestRunNoArgsShowsHelp(t *testing.T) {
@@ -132,6 +137,8 @@ func assertUsage(t *testing.T, out string) {
 		"librevote trustee-election create",
 		"librevote trustee nominate",
 		"librevote trustee result build",
+		"librevote node sync",
+		"librevote node serve",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout missing %q in:\n%s", want, out)
@@ -514,6 +521,70 @@ func TestVoterAliasNormalization(t *testing.T) {
 	}
 }
 
+func TestNodeNoSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"node"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run() exit code = %d; want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "node requires a subcommand") {
+		t.Fatalf("stderr = %q; want subcommand error", stderr.String())
+	}
+}
+
+func TestNodeUnknownSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"node", "unknown"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run() exit code = %d; want 2", code)
+	}
+	if got, want := stderr.String(), "error: unknown node subcommand \"unknown\"\n"; got != want {
+		t.Fatalf("stderr = %q; want %q", got, want)
+	}
+}
+
+func TestNodeSyncMissingFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"node", "sync"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run() exit code = %d; want 2", code)
+	}
+	if got, want := stderr.String(), "error: --db and --peer are required\n"; got != want {
+		t.Fatalf("stderr = %q; want %q", got, want)
+	}
+}
+
+func TestNodeServeMissingFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"node", "serve"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run() exit code = %d; want 2", code)
+	}
+	if got, want := stderr.String(), "error: --db is required\n"; got != want {
+		t.Fatalf("stderr = %q; want %q", got, want)
+	}
+}
+
+func TestNodeSyncNetworkAutoDetect(t *testing.T) {
+	dataDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"init", "--db", dataDir, "--network", "testnet"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init failed: %s", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"node", "sync", "--db", dataDir, "--peer", "http://localhost:1"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit connecting to invalid peer, got 0: stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "sync error") && !strings.Contains(stderr.String(), "inventory") {
+		t.Logf("stdout: %s", stdout.String())
+		t.Logf("stderr: %s", stderr.String())
+	}
+}
+
 func TestVoterAliasInVoteCommand(t *testing.T) {
 	dataDir := t.TempDir()
 	run := func(args []string) (string, string, int) {
@@ -556,4 +627,155 @@ func TestVoterAliasInVoteCommand(t *testing.T) {
 	if !strings.Contains(stdout, "voter: voter-2") {
 		t.Fatalf("stdout = %q; want voter-2", stdout)
 	}
+}
+
+func TestNodeSyncRequiresScopeIDForIDScopedScope(t *testing.T) {
+	dataDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"init", "--db", dataDir, "--network", "testnet"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init failed: %s", stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	code = Run([]string{"node", "sync", "--db", dataDir, "--peer", "http://localhost:1", "--scope", "trustee_selection_id"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), `requires --scope-id`) {
+		t.Fatalf("expected scope-id required error, got: %s", stderr.String())
+	}
+}
+
+func TestNodeSyncRequiresEmptyScopeIDForNetworkScope(t *testing.T) {
+	dataDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"init", "--db", dataDir, "--network", "testnet"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init failed: %s", stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	code = Run([]string{"node", "sync", "--db", dataDir, "--peer", "http://localhost:1", "--scope", "network", "--scope-id", "ts-1"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), `requires empty --scope-id`) {
+		t.Fatalf("expected empty scope-id required error, got: %s", stderr.String())
+	}
+}
+
+func TestNodeSyncSuccessWithHTTPServer(t *testing.T) {
+	dataDirA := t.TempDir()
+	dataDirB := t.TempDir()
+
+	run := func(args []string) (string, string, int) {
+		var stdout, stderr bytes.Buffer
+		code := Run(args, &stdout, &stderr)
+		return stdout.String(), stderr.String(), code
+	}
+
+	stdout, stderr, code := run([]string{"init", "--db", dataDirA, "--network", "testnet"})
+	if code != 0 {
+		t.Fatalf("init A failed: %s", stderr)
+	}
+	t.Logf("init A: %s", stdout)
+
+	stdout, stderr, code = run([]string{"trustee-election", "create", "--db", dataDirA, "--id", "ts-1", "--network", "testnet", "--title", "Test Election"})
+	if code != 0 {
+		t.Fatalf("election create failed: %s", stderr)
+	}
+	if !strings.Contains(stdout, "status: valid") {
+		t.Fatalf("election not valid: %s", stdout)
+	}
+	t.Logf("election: %s", strings.TrimSpace(stdout))
+
+	for _, name := range []string{"alice", "bob", "carol"} {
+		stdout, stderr, code = run([]string{"trustee", "nominate", "--db", dataDirA, "--selection", "ts-1", "--name", name, "--network", "testnet"})
+		if code != 0 {
+			t.Fatalf("nominate %s failed: %s", name, stderr)
+		}
+		if !strings.Contains(stdout, "status: valid") {
+			t.Fatalf("nomination %s not valid: %s", name, stdout)
+		}
+	}
+
+	stdout, stderr, code = run([]string{"trustee", "vote", "--db", dataDirA, "--selection", "ts-1", "--voter", "voter-1", "--candidates", "alice", "--network", "testnet"})
+	if code != 0 {
+		t.Fatalf("vote failed: %s", stderr)
+	}
+	if !strings.Contains(stdout, "status: valid_for_tally") {
+		t.Fatalf("vote not valid_for_tally: %s", stdout)
+	}
+
+	stdout, stderr, code = run([]string{"trustee", "result", "build", "--db", dataDirA, "--selection", "ts-1", "--network", "testnet"})
+	if code != 0 {
+		t.Fatalf("result build failed: %s", stderr)
+	}
+	if !strings.Contains(stdout, "status: valid") {
+		t.Fatalf("result not valid: %s", stdout)
+	}
+
+	svcA, err := app.Open(dataDirA, "testnet")
+	if err != nil {
+		t.Fatalf("open svcA: %v", err)
+	}
+	defer svcA.Close()
+
+	server := transport.NewServer(svcA, "testnet")
+	testServer := httptest.NewServer(server.Handler())
+	defer testServer.Close()
+
+	stdout, stderr, code = run([]string{"init", "--db", dataDirB, "--network", "testnet"})
+	if code != 0 {
+		t.Fatalf("init B failed: %s", stderr)
+	}
+
+	stdout, stderr, code = run([]string{"node", "sync", "--db", dataDirB, "--peer", testServer.URL, "--scope", "network"})
+	if code != 0 {
+		t.Fatalf("node sync network scope: code=%d stderr=%s stdout=%s", code, stderr, stdout)
+	}
+	if !strings.Contains(stdout, "sync complete") {
+		t.Fatalf("sync output missing 'sync complete': %s", stdout)
+	}
+	if !strings.Contains(stdout, "fetched:") || !strings.Contains(stdout, "ingested:") {
+		t.Fatalf("sync output missing counts: %s", stdout)
+	}
+	t.Logf("sync network scope: %s", strings.TrimSpace(stdout))
+
+	stdout, stderr, code = run([]string{"node", "sync", "--db", dataDirB, "--peer", testServer.URL, "--scope", "trustee_selection_id", "--scope-id", "ts-1"})
+	if code != 0 {
+		t.Fatalf("node sync scoped: code=%d stderr=%s stdout=%s", code, stderr, stdout)
+	}
+	if !strings.Contains(stdout, "sync complete") {
+		t.Fatalf("scoped sync output missing 'sync complete': %s", stdout)
+	}
+	t.Logf("sync scoped: %s", strings.TrimSpace(stdout))
+
+	ctx := context.Background()
+	svcB, err := app.Open(dataDirB, "testnet")
+	if err != nil {
+		t.Fatalf("open svcB: %v", err)
+	}
+	defer svcB.Close()
+
+	refsNetwork, err := svcB.ListServableObjectRefs(ctx, "network", "", nil)
+	if err != nil {
+		t.Fatalf("list network refs on B: %v", err)
+	}
+	if len(refsNetwork) == 0 {
+		t.Fatal("expected at least one object from network scope sync")
+	}
+	t.Logf("node B network scope objects: %d", len(refsNetwork))
+
+	refsScoped, err := svcB.ListServableObjectRefs(ctx, "trustee_selection_id", "ts-1", nil)
+	if err != nil {
+		t.Fatalf("list scoped refs on B: %v", err)
+	}
+	if len(refsScoped) == 0 {
+		t.Fatal("expected objects from trustee_selection_id scope sync")
+	}
+	t.Logf("node B scoped objects: %d", len(refsScoped))
 }

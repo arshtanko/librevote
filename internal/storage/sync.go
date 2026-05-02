@@ -141,8 +141,14 @@ func validateListServableParams(scope string, scopeID string) error {
 	if scope == "" {
 		return errors.New("scope is required")
 	}
-	if !domain.ScopeIDRequired(domain.Scope(scope)) && scopeID != "" {
-		return fmt.Errorf("scope %q requires empty scope_id", scope)
+	if domain.ScopeIDRequired(domain.Scope(scope)) {
+		if scopeID == "" {
+			return fmt.Errorf("scope %q requires non-empty scope_id", scope)
+		}
+	} else {
+		if scopeID != "" {
+			return fmt.Errorf("scope %q requires empty scope_id", scope)
+		}
 	}
 	return nil
 }

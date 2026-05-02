@@ -21,6 +21,8 @@ Commands:
   librevote trustee nominate --db <path> --selection <id> --name <candidate_name> [--network <id>]
   librevote trustee vote --db <path> --selection <id> --voter <name> --candidates <name1,name2,name3> [--network <id>]
   librevote trustee result build --db <path> --selection <id> [--network <id>]
+  librevote node sync --db <path> --peer <url> [--scope <scope>] [--scope-id <id>] [--network <id>]
+  librevote node serve --db <path> --listen <addr> [--network <id>]
 `
 
 // Run executes the CLI surface for the MVP trustee-selection stage.
@@ -51,6 +53,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdTrusteeElection(args[1:], stdout, stderr)
 	case "trustee":
 		return cmdTrustee(args[1:], stdout, stderr)
+	case "node":
+		return cmdNode(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "error: unknown command %q\n", args[0])
 		return 2

@@ -5,10 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"librevote/internal/app"
 	"librevote/internal/domain"
+	"librevote/internal/sync"
+	"librevote/internal/transport"
 )
 
 func parseFlags(args []string, known map[string]struct{}) (map[string]string, error) {
@@ -372,6 +378,158 @@ func cmdTrusteeResultBuild(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func cmdNode(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "error: node requires a subcommand: sync, serve")
+		return 2
+	}
+	switch args[0] {
+	case "sync":
+		return cmdNodeSync(args[1:], stdout, stderr)
+	case "serve":
+		return cmdNodeServe(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "error: unknown node subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func cmdNodeSync(args []string, stdout, stderr io.Writer) int {
+	flags, err := parseFlags(args, nodeSyncKnownFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+	dataDir := flags["db"]
+	peerURLs := flags["peer"]
+	if dataDir == "" || peerURLs == "" {
+		fmt.Fprintln(stderr, "error: --db and --peer are required")
+		return 2
+	}
+	scope := flags["scope"]
+	if scope == "" {
+		scope = string(domain.ScopeNetwork)
+	}
+	scopeID := flags["scope-id"]
+	if domain.ScopeIDRequired(domain.Scope(scope)) {
+		if scopeID == "" {
+			fmt.Fprintf(stderr, "error: scope %q requires --scope-id\n", scope)
+			return 2
+		}
+	} else {
+		if scopeID != "" {
+			fmt.Fprintf(stderr, "error: scope %q requires empty --scope-id\n", scope)
+			return 2
+		}
+	}
+
+	networkID := flags["network"]
+	if networkID == "" {
+		stored, err := app.ReadNetworkID(dataDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: --network is required (could not read stored network: %v)\n", err)
+			return 2
+		}
+		networkID = stored
+	}
+
+	svc, err := app.Open(dataDir, networkID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: open failed: %v\n", err)
+		return 1
+	}
+	defer svc.Close()
+
+	peers := strings.Split(peerURLs, ",")
+	for i := range peers {
+		peers[i] = strings.TrimSpace(peers[i])
+	}
+
+	ctx := context.Background()
+	httpTransport := transport.NewHTTPTransport()
+
+	result, err := sync.Sync(ctx, httpTransport, svc, svc, scope, scopeID, nil, peers)
+	if err != nil {
+		fmt.Fprintf(stderr, "sync error: %v\n", err)
+	}
+
+	fmt.Fprintf(stdout, "sync complete\n")
+	fmt.Fprintf(stdout, "  scope: %s\n", scope)
+	if scopeID != "" {
+		fmt.Fprintf(stdout, "  scope_id: %s\n", scopeID)
+	}
+	fmt.Fprintf(stdout, "  fetched: %d\n", result.Fetched)
+	fmt.Fprintf(stdout, "  ingested: %d\n", result.Ingested)
+	if len(result.Errors) > 0 {
+		fmt.Fprintf(stdout, "  errors: %d\n", len(result.Errors))
+		for _, e := range result.Errors {
+			fmt.Fprintf(stdout, "    - %s\n", e)
+		}
+	}
+	if err != nil {
+		return 6
+	}
+	return 0
+}
+
+func cmdNodeServe(args []string, stdout, stderr io.Writer) int {
+	flags, err := parseFlags(args, nodeServeKnownFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+	dataDir := flags["db"]
+	listenAddr := flags["listen"]
+	if dataDir == "" {
+		fmt.Fprintln(stderr, "error: --db is required")
+		return 2
+	}
+	if listenAddr == "" {
+		listenAddr = ":8080"
+	}
+
+	networkID := flags["network"]
+	if networkID == "" {
+		stored, err := app.ReadNetworkID(dataDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: --network is required (could not read stored network: %v)\n", err)
+			return 2
+		}
+		networkID = stored
+	}
+
+	svc, err := app.Open(dataDir, networkID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: open failed: %v\n", err)
+		return 1
+	}
+	defer svc.Close()
+
+	server := transport.NewServer(svc, networkID)
+	httpServer := &http.Server{
+		Addr:    listenAddr,
+		Handler: server.Handler(),
+	}
+
+	fmt.Fprintf(stdout, "serving on %s (network: %s)\n", listenAddr, networkID)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-sigCh
+		httpServer.Shutdown(context.Background())
+	}()
+
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fmt.Fprintf(stderr, "error: serve failed: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintln(stdout, "server stopped")
+	return 0
+}
+
 var initKnownFlags = flagSet("db", "network")
 
 var trusteeElectionCreateKnownFlags = flagSet("db", "id", "network", "title")
@@ -381,6 +539,10 @@ var trusteeNominateKnownFlags = flagSet("db", "selection", "name", "network")
 var trusteeVoteKnownFlags = flagSet("db", "selection", "voter", "candidates", "network")
 
 var trusteeResultBuildKnownFlags = flagSet("db", "selection", "network")
+
+var nodeSyncKnownFlags = flagSet("db", "peer", "scope", "scope-id", "network")
+
+var nodeServeKnownFlags = flagSet("db", "listen", "network")
 
 func flagSet(names ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(names))

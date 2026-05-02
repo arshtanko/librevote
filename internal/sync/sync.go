@@ -66,6 +66,31 @@ var dependencyRank = map[string]int{
 	string(domain.ObjectTypeTallyResult):              8,
 }
 
+func verifyEnvelopeMatchesRef(envelope domain.ObjectEnvelope, ref ObjectRef, scope string, scopeID string) error {
+	if envelope.ObjectID != ref.ObjectID {
+		return fmt.Errorf("object_id mismatch: envelope %q != ref %q", envelope.ObjectID, ref.ObjectID)
+	}
+	if string(envelope.ObjectType) != ref.ObjectType {
+		return fmt.Errorf("object_type mismatch: envelope %q != ref %q", envelope.ObjectType, ref.ObjectType)
+	}
+	if string(envelope.Scope) != ref.Scope {
+		return fmt.Errorf("scope mismatch: envelope %q != ref %q", envelope.Scope, ref.Scope)
+	}
+	if envelope.ScopeID != ref.ScopeID {
+		return fmt.Errorf("scope_id mismatch: envelope %q != ref %q", envelope.ScopeID, ref.ScopeID)
+	}
+	if string(envelope.Scope) != scope {
+		return fmt.Errorf("envelope scope %q does not match sync scope %q", envelope.Scope, scope)
+	}
+	if scopeID != "" && envelope.ScopeID != scopeID {
+		return fmt.Errorf("envelope scope_id %q does not match sync scope_id %q", envelope.ScopeID, scopeID)
+	}
+	if scopeID == "" && envelope.ScopeID != "" {
+		return fmt.Errorf("envelope scope_id %q but sync scope_id is empty (scope=%s)", envelope.ScopeID, scope)
+	}
+	return nil
+}
+
 type peerRefInfo struct {
 	ref   ObjectRef
 	peers []string
@@ -135,6 +160,10 @@ func Sync(ctx context.Context, transport Transport, store StoreQuerier, ingester
 		}
 		if fetchErr != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("fetch %s: %v", ref.ObjectID, fetchErr))
+			continue
+		}
+		if err := verifyEnvelopeMatchesRef(envelope, ref, scope, scopeID); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("verify %s: %v", ref.ObjectID, err))
 			continue
 		}
 		result.Fetched++
