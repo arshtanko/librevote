@@ -24,3 +24,8 @@ func demoEncryptionKeyFromName(name string) []byte {
 	h := sha256.Sum256([]byte(name + ".enc"))
 	return h[:]
 }
+
+func demoTallySetupKeyFromName(name string) []byte {
+	h := sha256.Sum256([]byte(name + ".tally-setup"))
+	return h[:]
+}

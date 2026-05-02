@@ -21,6 +21,10 @@ Commands:
   librevote trustee nominate --db <path> --selection <id> --name <candidate_name> [--network <id>]
   librevote trustee vote --db <path> --selection <id> --voter <name> --candidates <name1,name2,name3> [--network <id>]
   librevote trustee result build --db <path> --selection <id> [--network <id>]
+  librevote trustee consent --db <path> --name <name> --election <id> [--network <id>]
+  librevote election create --db <path> --id <id> --title <title> --selection <id> [--options <opts>] [--network <id>]
+  librevote tally-key contribute --db <path> --election <id> --name <name> [--network <id>]
+  librevote tally-key build --db <path> --election <id> [--network <id>]
   librevote node sync --db <path> --peer <url> [--scope <scope>] [--scope-id <id>] [--network <id>]
   librevote node serve --db <path> --listen <addr> [--network <id>]
 `
@@ -53,6 +57,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdTrusteeElection(args[1:], stdout, stderr)
 	case "trustee":
 		return cmdTrustee(args[1:], stdout, stderr)
+	case "election":
+		return cmdElection(args[1:], stdout, stderr)
+	case "tally-key":
+		return cmdTallyKey(args[1:], stdout, stderr)
 	case "node":
 		return cmdNode(args[1:], stdout, stderr)
 	default:

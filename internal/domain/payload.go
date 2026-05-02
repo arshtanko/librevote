@@ -1135,3 +1135,116 @@ func EncodeTrusteeSelectionResultPayload(p TrusteeSelectionResultPayload) []byte
 	b.bytesField(11, p.Signature)
 	return b.Bytes()
 }
+
+func encodeDKGCommitment(commitment DKGCommitment) []byte {
+	var b domainPayloadBuilder
+	b.bytesField(1, commitment.SenderTrusteePublicKey)
+	b.int64Field(2, commitment.CoefficientIndex)
+	b.bytesField(3, commitment.Commitment)
+	return b.Bytes()
+}
+
+func encodeDKGEncryptedShare(share DKGEncryptedShare) []byte {
+	var b domainPayloadBuilder
+	b.bytesField(1, share.SenderTrusteePublicKey)
+	b.bytesField(2, share.RecipientTrusteePublicKey)
+	b.bytesField(3, share.RecipientTallySetupKeyID)
+	b.int64Field(4, share.RecipientIndex)
+	b.bytesField(5, share.EncryptedShare)
+	b.bytesField(6, share.ShareEncryptionProof)
+	return b.Bytes()
+}
+
+func EncodeTrusteeConsentPayload(p TrusteeConsentPayload) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, p.TrusteeSelectionID)
+	b.bytesField(2, p.TrusteeSelectionResultHash)
+	b.stringField(3, p.ElectionID)
+	b.bytesField(4, p.ElectionParametersHash)
+	b.bytesField(5, p.TrusteePublicKey)
+	b.bytesField(6, p.TrusteeTallySetupPublicKey)
+	b.int64Field(7, p.ThresholdT)
+	b.int64Field(8, p.TrusteeCountN)
+	b.bytesField(9, p.Signature)
+	return b.Bytes()
+}
+
+func TrusteeConsentSignatureField() uint64 { return 9 }
+
+func EncodeTallyKeyContributionPayload(p TallyKeyContributionPayload) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, p.ElectionID)
+	b.bytesField(2, p.TrusteePublicKey)
+	b.bytesField(3, p.TrusteeTallySetupPublicKey)
+	for _, commitment := range p.DKGCommitments {
+		b.subMessageField(4, encodeDKGCommitment(commitment))
+	}
+	for _, share := range p.DKGEncryptedShares {
+		b.subMessageField(5, encodeDKGEncryptedShare(share))
+	}
+	b.bytesField(6, p.SetupProof)
+	b.bytesField(7, p.Signature)
+	return b.Bytes()
+}
+
+func TallyKeyContributionSignatureField() uint64 { return 7 }
+
+func EncodeAnonymousElectionPayload(p AnonymousElectionPayload) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, p.ElectionID)
+	b.stringField(2, p.NetworkID)
+	b.stringField(3, p.Title)
+	b.stringField(4, p.Description)
+	for _, option := range p.Options {
+		b.stringField(5, option)
+	}
+	for _, entry := range p.VoterAllowlist {
+		b.subMessageField(6, encodeVoterEntry(entry))
+	}
+	b.stringField(7, p.TrusteeSelectionID)
+	b.bytesField(8, p.TrusteeSelectionResultHash)
+	b.int64Field(9, p.ThresholdT)
+	b.int64Field(10, p.TrusteeCountN)
+	b.stringField(11, p.EligibilityScheme)
+	b.int64Field(12, p.IssuanceStartsAt)
+	b.int64Field(13, p.IssuanceEndsAt)
+	b.int64Field(14, p.VotingStartsAt)
+	b.int64Field(15, p.VotingEndsAt)
+	b.int64Field(16, p.TallyStartsAt)
+	b.bytesField(17, p.CreatorPublicKey)
+	b.bytesField(18, p.Signature)
+	return b.Bytes()
+}
+
+func AnonymousElectionSignatureField() uint64 { return 18 }
+
+func EncodeTallyKeySetPayload(p TallyKeySetPayload) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, p.ElectionID)
+	b.bytesField(2, p.TrusteeSelectionResultHash)
+	for _, trustee := range p.TrusteeSet {
+		b.subMessageField(3, encodeTrusteeCandidate(trustee, true))
+	}
+	for _, id := range p.TrusteeConsentObjectIDs {
+		b.stringField(4, id)
+	}
+	for _, id := range p.TallyKeyContributionObjectIDs {
+		b.stringField(5, id)
+	}
+	b.bytesField(6, p.TrusteeSetHash)
+	b.int64Field(7, p.ThresholdT)
+	b.int64Field(8, p.TrusteeCountN)
+	b.bytesField(9, p.TallyPublicKey)
+	for _, commitment := range p.TrusteeKeyCommitments {
+		b.bytesField(10, commitment)
+	}
+	for _, proof := range p.SetupProofs {
+		b.bytesField(11, proof)
+	}
+	b.bytesField(12, p.TallyKeySetHash)
+	b.bytesField(13, p.ReporterPublicKey)
+	b.bytesField(14, p.Signature)
+	return b.Bytes()
+}
+
+func TallyKeySetSignatureField() uint64 { return 14 }

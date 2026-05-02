@@ -763,9 +763,9 @@ func recomputableTallyKeySetInputs(t *testing.T) TallyKeySetInputs {
 			Payload:  consent,
 		})
 	}
-	finalSet, _, ok := deriveFinalTrusteeSet(result, consents)
+	finalSet, _, ok := DeriveFinalTrusteeSet(result, consents)
 	if !ok {
-		t.Fatal("deriveFinalTrusteeSet() failed for fixture")
+		t.Fatal("DeriveFinalTrusteeSet() failed for fixture")
 	}
 	for i, trustee := range finalSet {
 		index := byte(i + 1)
@@ -822,13 +822,13 @@ func tallyKeySetShares(sender []byte, trustees []domain.TrusteeCandidate) []doma
 
 func recomputedTallyKeySet(t *testing.T, inputs TallyKeySetInputs) domain.TallyKeySetPayload {
 	t.Helper()
-	finalSet, consentIDs, ok := deriveFinalTrusteeSet(inputs.Result, inputs.Consents)
+	finalSet, consentIDs, ok := DeriveFinalTrusteeSet(inputs.Result, inputs.Consents)
 	if !ok {
-		t.Fatal("deriveFinalTrusteeSet() failed")
+		t.Fatal("DeriveFinalTrusteeSet() failed")
 	}
-	contributionIDs, commitments, setupProofs, contributionIssue, _ := retainedContributionsForTrustees(inputs.Election.ElectionID, finalSet, inputs.Contributions)
+	contributionIDs, commitments, setupProofs, contributionIssue, _ := RetainedContributionsForTrustees(inputs.Election.ElectionID, finalSet, inputs.Contributions)
 	if contributionIssue != "" {
-		t.Fatalf("retainedContributionsForTrustees() failed: %s", contributionIssue)
+		t.Fatalf("RetainedContributionsForTrustees() failed: %s", contributionIssue)
 	}
 	keySet := domain.TallyKeySetPayload{
 		ElectionID:                    inputs.Election.ElectionID,

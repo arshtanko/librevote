@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"librevote/internal/domain"
 	"librevote/internal/sync"
 	"librevote/internal/transport"
+	"librevote/internal/validation"
 )
 
 func parseFlags(args []string, known map[string]struct{}) (map[string]string, error) {
@@ -162,7 +164,7 @@ func cmdTrusteeElectionCreate(args []string, stdout, stderr io.Writer) int {
 
 func cmdTrustee(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "error: trustee requires a subcommand: nominate, vote, result")
+		fmt.Fprintln(stderr, "error: trustee requires a subcommand: nominate, vote, result, consent")
 		return 2
 	}
 	switch args[0] {
@@ -172,6 +174,8 @@ func cmdTrustee(args []string, stdout, stderr io.Writer) int {
 		return cmdTrusteeVote(args[1:], stdout, stderr)
 	case "result":
 		return cmdTrusteeResult(args[1:], stdout, stderr)
+	case "consent":
+		return cmdTrusteeConsent(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "error: unknown trustee subcommand %q\n", args[0])
 		return 2
@@ -378,6 +382,328 @@ func cmdTrusteeResultBuild(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func cmdTrusteeConsent(args []string, stdout, stderr io.Writer) int {
+	flags, err := parseFlags(args, trusteeConsentKnownFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+	dataDir := flags["db"]
+	name := flags["name"]
+	electionID := flags["election"]
+	if dataDir == "" || name == "" || electionID == "" {
+		fmt.Fprintln(stderr, "error: --db, --name, and --election are required")
+		return 2
+	}
+	networkID := flags["network"]
+	if networkID == "" {
+		stored, err := app.ReadNetworkID(dataDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: --network is required (could not read stored network: %v)\n", err)
+			return 2
+		}
+		networkID = stored
+	}
+
+	svc, err := app.Open(dataDir, networkID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: open failed: %v\n", err)
+		return 1
+	}
+	defer svc.Close()
+
+	ctx := context.Background()
+
+	electionPayload, err := svc.LoadAnonymousElection(ctx, electionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: load election: %v\n", err)
+		return 5
+	}
+
+	trusteePriv := demoEd25519PrivFromName(name)
+	trusteePub := demoEd25519PubFromName(name)
+	tallySetupKey := demoTallySetupKeyFromName(name)
+
+	payload := domain.TrusteeConsentPayload{
+		TrusteeSelectionID:         electionPayload.TrusteeSelectionID,
+		TrusteeSelectionResultHash: electionPayload.TrusteeSelectionResultHash,
+		ElectionID:                 electionID,
+		ElectionParametersHash:     validation.ComputeElectionParametersHash(electionPayload),
+		TrusteePublicKey:           trusteePub,
+		TrusteeTallySetupPublicKey: tallySetupKey,
+		ThresholdT:                 domain.ThresholdV1,
+		TrusteeCountN:              domain.TrusteeCountV1,
+	}
+
+	envelope, err := svc.CreateTrusteeConsent(ctx, payload, trusteePriv, 5500)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: create trustee consent failed: %v\n", err)
+		return 5
+	}
+
+	fmt.Fprintf(stdout, "created %s\n", envelope.ObjectID)
+	fmt.Fprintf(stdout, "  type: %s\n", envelope.ObjectType)
+	fmt.Fprintf(stdout, "  trustee: %s\n", name)
+	fmt.Fprintf(stdout, "  election: %s\n", electionID)
+	status, _, err := svc.ValidationStatus(ctx, envelope.ObjectID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: check status failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "  status: %s\n", status)
+	return 0
+}
+
+func cmdElection(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "error: election requires a subcommand: create")
+		return 2
+	}
+	switch args[0] {
+	case "create":
+		return cmdElectionCreate(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "error: unknown election subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func cmdElectionCreate(args []string, stdout, stderr io.Writer) int {
+	flags, err := parseFlags(args, electionCreateKnownFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+	dataDir := flags["db"]
+	electionID := flags["id"]
+	title := flags["title"]
+	selectionID := flags["selection"]
+	if dataDir == "" || electionID == "" || title == "" || selectionID == "" {
+		fmt.Fprintln(stderr, "error: --db, --id, --title, and --selection are required")
+		return 2
+	}
+	networkID := flags["network"]
+	if networkID == "" {
+		stored, err := app.ReadNetworkID(dataDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: --network is required (could not read stored network: %v)\n", err)
+			return 2
+		}
+		networkID = stored
+	}
+
+	optionsStr := flags["options"]
+	options := []string{"yes", "no"}
+	if optionsStr != "" {
+		options = strings.Split(optionsStr, ",")
+		for i := range options {
+			options[i] = strings.TrimSpace(options[i])
+		}
+	}
+
+	svc, err := app.Open(dataDir, networkID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: open failed: %v\n", err)
+		return 1
+	}
+	defer svc.Close()
+
+	ctx := context.Background()
+
+	voterNames := []string{"voter-1", "voter-2", "voter-3"}
+	voters := make([]domain.VoterEntry, len(voterNames))
+	for i, name := range voterNames {
+		voters[i] = domain.VoterEntry{
+			VoterID:                  name,
+			VoterSigningPublicKey:    demoEd25519PubFromName(name),
+			VoterEncryptionPublicKey: demoEncryptionKeyFromName(name),
+		}
+	}
+
+	creatorPriv := demoEd25519PrivFromName("creator")
+
+	resultHash, err := svc.TrusteeSelectionResultHash(ctx, selectionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: cannot find trustee selection result for %s: %v\n", selectionID, err)
+		return 5
+	}
+
+	payload := domain.AnonymousElectionPayload{
+		ElectionID:                 electionID,
+		NetworkID:                  networkID,
+		Title:                      title,
+		Description:                "MVP anonymous election",
+		Options:                    options,
+		VoterAllowlist:             voters,
+		TrusteeSelectionID:         selectionID,
+		TrusteeSelectionResultHash: resultHash,
+		ThresholdT:                 domain.ThresholdV1,
+		TrusteeCountN:              domain.TrusteeCountV1,
+		EligibilityScheme:          domain.EligibilitySchemeBlindTokenV1,
+		IssuanceStartsAt:           7000,
+		IssuanceEndsAt:             8000,
+		VotingStartsAt:             9000,
+		VotingEndsAt:               10000,
+		TallyStartsAt:              11000,
+	}
+
+	envelope, err := svc.CreateAnonymousElection(ctx, payload, creatorPriv, 6000)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: create election failed: %v\n", err)
+		return 5
+	}
+
+	fmt.Fprintf(stdout, "created %s\n", envelope.ObjectID)
+	fmt.Fprintf(stdout, "  type: %s\n", envelope.ObjectType)
+	fmt.Fprintf(stdout, "  title: %s\n", title)
+	fmt.Fprintf(stdout, "  election_id: %s\n", electionID)
+	fmt.Fprintf(stdout, "  selection_id: %s\n", selectionID)
+	fmt.Fprintf(stdout, "  options: %s\n", strings.Join(options, ", "))
+	status, _, err := svc.ValidationStatus(ctx, envelope.ObjectID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: check status failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "  status: %s\n", status)
+	return 0
+}
+
+func cmdTallyKey(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "error: tally-key requires a subcommand: contribute, build")
+		return 2
+	}
+	switch args[0] {
+	case "contribute":
+		return cmdTallyKeyContribute(args[1:], stdout, stderr)
+	case "build":
+		return cmdTallyKeyBuild(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "error: unknown tally-key subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func cmdTallyKeyContribute(args []string, stdout, stderr io.Writer) int {
+	flags, err := parseFlags(args, tallyKeyContributeKnownFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+	dataDir := flags["db"]
+	electionID := flags["election"]
+	name := flags["name"]
+	if dataDir == "" || electionID == "" || name == "" {
+		fmt.Fprintln(stderr, "error: --db, --election, and --name are required")
+		return 2
+	}
+	networkID := flags["network"]
+	if networkID == "" {
+		stored, err := app.ReadNetworkID(dataDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: --network is required (could not read stored network: %v)\n", err)
+			return 2
+		}
+		networkID = stored
+	}
+
+	svc, err := app.Open(dataDir, networkID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: open failed: %v\n", err)
+		return 1
+	}
+	defer svc.Close()
+
+	ctx := context.Background()
+
+	finalTrustees, err := svc.FinalTrusteeSet(ctx, electionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: final trustee set: %v\n", err)
+		return 5
+	}
+
+	trusteePriv := demoEd25519PrivFromName(name)
+	trusteePub := demoEd25519PubFromName(name)
+	tallySetupKey := demoTallySetupKeyFromName(name)
+
+	envelope, err := svc.CreateTallyKeyContribution(ctx, electionID, trusteePub, tallySetupKey, finalTrustees, trusteePriv, 8000)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: create tally key contribution failed: %v\n", err)
+		return 5
+	}
+
+	fmt.Fprintf(stdout, "created %s\n", envelope.ObjectID)
+	fmt.Fprintf(stdout, "  type: %s\n", envelope.ObjectType)
+	fmt.Fprintf(stdout, "  trustee: %s\n", name)
+	fmt.Fprintf(stdout, "  election: %s\n", electionID)
+	status, _, err := svc.ValidationStatus(ctx, envelope.ObjectID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: check status failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "  status: %s\n", status)
+	return 0
+}
+
+func cmdTallyKeyBuild(args []string, stdout, stderr io.Writer) int {
+	flags, err := parseFlags(args, tallyKeyBuildKnownFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+	dataDir := flags["db"]
+	electionID := flags["election"]
+	if dataDir == "" || electionID == "" {
+		fmt.Fprintln(stderr, "error: --db and --election are required")
+		return 2
+	}
+	networkID := flags["network"]
+	if networkID == "" {
+		stored, err := app.ReadNetworkID(dataDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: --network is required (could not read stored network: %v)\n", err)
+			return 2
+		}
+		networkID = stored
+	}
+
+	svc, err := app.Open(dataDir, networkID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: open failed: %v\n", err)
+		return 1
+	}
+	defer svc.Close()
+
+	ctx := context.Background()
+
+	reporterPub := demoEd25519PubFromName("reporter")
+	reporterPriv := demoEd25519PrivFromName("reporter")
+
+	envelope, err := svc.BuildTallyKeySet(ctx, electionID, reporterPub, reporterPriv)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: build tally key set failed: %v\n", err)
+		return 5
+	}
+
+	fmt.Fprintf(stdout, "created %s\n", envelope.ObjectID)
+	fmt.Fprintf(stdout, "  type: %s\n", envelope.ObjectType)
+	fmt.Fprintf(stdout, "  election_id: %s\n", electionID)
+	status, _, err := svc.ValidationStatus(ctx, envelope.ObjectID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: check status failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "  status: %s\n", status)
+	return 0
+}
+
+func placeholderHash(tag, seed string) []byte {
+	h := sha256.New()
+	h.Write([]byte(tag))
+	h.Write([]byte(seed))
+	return h.Sum(nil)
+}
+
 func cmdNode(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "error: node requires a subcommand: sync, serve")
@@ -539,6 +865,14 @@ var trusteeNominateKnownFlags = flagSet("db", "selection", "name", "network")
 var trusteeVoteKnownFlags = flagSet("db", "selection", "voter", "candidates", "network")
 
 var trusteeResultBuildKnownFlags = flagSet("db", "selection", "network")
+
+var trusteeConsentKnownFlags = flagSet("db", "name", "election", "network")
+
+var electionCreateKnownFlags = flagSet("db", "id", "title", "selection", "options", "network")
+
+var tallyKeyContributeKnownFlags = flagSet("db", "election", "name", "network")
+
+var tallyKeyBuildKnownFlags = flagSet("db", "election", "network")
 
 var nodeSyncKnownFlags = flagSet("db", "peer", "scope", "scope-id", "network")
 

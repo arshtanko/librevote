@@ -18,6 +18,7 @@ const (
 	DomainTrusteeSelectionResultHash   Domain = "librevote-trustee-selection-result-hash-v1"
 	DomainTrusteeSelectionResultSign   Domain = "librevote-trustee-selection-result-sign-v1"
 	DomainTrusteeSelectionElectionSign Domain = "librevote-trustee-selection-election-sign-v1"
+	DomainAnonymousElectionSign        Domain = "librevote-anonymous-election-sign-v1"
 	DomainTrusteeConsentSign           Domain = "librevote-trustee-consent-sign-v1"
 	DomainTallyKeyContributionSign     Domain = "librevote-tally-key-contribution-sign-v1"
 	DomainTallyKeySetSign              Domain = "librevote-tally-key-set-sign-v1"

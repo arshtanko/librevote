@@ -194,10 +194,10 @@ func verifyTallyKeyContribution(envelope domain.ObjectEnvelope, payload domain.T
 	if matchingConsentPending != "" {
 		return pendingTallyKeySetDependency("trustee_consent", matchingConsentPending)
 	}
-	if hasDuplicateValidTrusteeConsent(inputs.Consents) {
+	if HasDuplicateValidTrusteeConsent(inputs.Consents) {
 		return invalidTallyKeySet("duplicate valid trustee consents")
 	}
-	finalSet, _, ok := deriveFinalTrusteeSet(inputs.Result, inputs.Consents)
+	finalSet, _, ok := DeriveFinalTrusteeSet(inputs.Result, inputs.Consents)
 	if !ok {
 		return pendingTallyKeySetDependency("trustee_consent", TrusteeConsentDependencyID(payload.ElectionID, nil))
 	}
@@ -243,11 +243,11 @@ func verifyTallyKeySet(envelope domain.ObjectEnvelope, payload domain.TallyKeySe
 	if inputs.Result.TrusteeSelectionID != inputs.Election.TrusteeSelectionID {
 		return invalidTallyKeySet("trustee selection result id does not match anonymous election")
 	}
-	if hasDuplicateValidTrusteeConsent(inputs.Consents) {
+	if HasDuplicateValidTrusteeConsent(inputs.Consents) {
 		return invalidTallyKeySet("duplicate valid trustee consents")
 	}
 
-	finalSet, consentIDs, ok := deriveFinalTrusteeSet(inputs.Result, inputs.Consents)
+	finalSet, consentIDs, ok := DeriveFinalTrusteeSet(inputs.Result, inputs.Consents)
 	if !ok {
 		return pendingTallyKeySetDependency("trustee_consent", TrusteeConsentDependencyID(payload.ElectionID, nil))
 	}
@@ -258,7 +258,7 @@ func verifyTallyKeySet(envelope domain.ObjectEnvelope, payload domain.TallyKeySe
 		return invalidTallyKeySet("trustee_consent_object_ids do not match locally retained valid consents")
 	}
 
-	contributionIDs, commitments, setupProofs, contributionIssue, contributionDependencyID := retainedContributionsForTrustees(payload.ElectionID, finalSet, inputs.Contributions)
+	contributionIDs, commitments, setupProofs, contributionIssue, contributionDependencyID := RetainedContributionsForTrustees(payload.ElectionID, finalSet, inputs.Contributions)
 	if contributionIssue == "missing" {
 		return pendingTallyKeySetDependency("tally_key_contribution", contributionDependencyID)
 	}
@@ -306,7 +306,7 @@ func verifyTallyKeySet(envelope domain.ObjectEnvelope, payload domain.TallyKeySe
 	return ContextualRuleResult{Status: StatusValid}
 }
 
-func deriveFinalTrusteeSet(result domain.TrusteeSelectionResultPayload, consents []TrusteeConsentInput) ([]domain.TrusteeCandidate, []string, bool) {
+func DeriveFinalTrusteeSet(result domain.TrusteeSelectionResultPayload, consents []TrusteeConsentInput) ([]domain.TrusteeCandidate, []string, bool) {
 	validConsents := make(map[string][]TrusteeConsentInput)
 	for _, consent := range consents {
 		if consent.Status != StatusValid {
@@ -345,7 +345,7 @@ func deriveFinalTrusteeSet(result domain.TrusteeSelectionResultPayload, consents
 	return finalSet, consentIDs, false
 }
 
-func hasDuplicateValidTrusteeConsent(consents []TrusteeConsentInput) bool {
+func HasDuplicateValidTrusteeConsent(consents []TrusteeConsentInput) bool {
 	seenTrustee := map[string]struct{}{}
 	seenSetup := map[string]struct{}{}
 	for _, consent := range consents {
@@ -366,7 +366,7 @@ func hasDuplicateValidTrusteeConsent(consents []TrusteeConsentInput) bool {
 	return false
 }
 
-func retainedContributionsForTrustees(electionID string, trustees []domain.TrusteeCandidate, contributions []TallyKeyContributionInput) ([]string, [][]byte, [][]byte, string, string) {
+func RetainedContributionsForTrustees(electionID string, trustees []domain.TrusteeCandidate, contributions []TallyKeyContributionInput) ([]string, [][]byte, [][]byte, string, string) {
 	valid := make(map[string]TallyKeyContributionInput)
 	for _, contribution := range contributions {
 		if contribution.Status == StatusValid {

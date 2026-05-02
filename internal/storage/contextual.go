@@ -206,6 +206,44 @@ func (s *Store) statusForTrusteeSelectionResult(ctx context.Context, selectionID
 	})
 }
 
+func (s *Store) TrusteeSelectionResultHash(ctx context.Context, selectionID string) ([]byte, error) {
+	if selectionID == "" {
+		return nil, errors.New("selection_id is required")
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT op.payload_bytes
+		 FROM objects o
+		 JOIN validation_records vr ON vr.object_id = o.object_id
+		 JOIN object_payloads op ON op.object_id = o.object_id
+		 WHERE o.object_type = ? AND o.scope = ? AND o.scope_id = ? AND vr.validation_status = ?
+		 ORDER BY o.object_id
+		 LIMIT 1`,
+		string(domain.ObjectTypeTrusteeSelectionResult), string(domain.ScopeTrusteeSelectionID), selectionID, string(validation.StatusValid))
+	if err != nil {
+		return nil, fmt.Errorf("query trustee selection result hash: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, fmt.Errorf("no valid trustee selection result for %s", selectionID)
+	}
+	var payload []byte
+	if err := rows.Scan(&payload); err != nil {
+		return nil, fmt.Errorf("scan trustee selection result hash: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read trustee selection result hash: %w", err)
+	}
+	decoded, err := domain.DecodePayload(domain.ObjectTypeTrusteeSelectionResult, payload)
+	if err != nil {
+		return nil, fmt.Errorf("decode trustee selection result: %w", err)
+	}
+	result := decoded.(domain.TrusteeSelectionResultPayload)
+	if result.TrusteeSelectionID != selectionID {
+		return nil, fmt.Errorf("trustee selection result does not match selection %s", selectionID)
+	}
+	return result.ResultHash, nil
+}
+
 func (s *Store) anonymousElectionByID(ctx context.Context, electionID string) (domain.AnonymousElectionPayload, validation.Status, bool, error) {
 	var out domain.AnonymousElectionPayload
 	status, found, err := s.payloadForDecodedPayload(ctx, domain.ObjectTypeAnonymousElection, func(payload []byte) (bool, error) {

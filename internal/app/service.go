@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -219,6 +220,226 @@ func (s *Service) BuildTrusteeSelectionResult(ctx context.Context, selectionID s
 	return s.ingestLocal(ctx, envelope, validation.StatusValid)
 }
 
+func (s *Service) CreateAnonymousElection(ctx context.Context, payload domain.AnonymousElectionPayload, creatorPrivKey ed25519.PrivateKey, createdAt int64) (domain.ObjectEnvelope, error) {
+	if len(payload.CreatorPublicKey) == 0 {
+		payload.CreatorPublicKey = []byte(creatorPrivKey.Public().(ed25519.PublicKey))
+	}
+	unsignedPayload := payload
+	unsignedPayload.Signature = nil
+	unsigned := domain.EncodeAnonymousElectionPayload(unsignedPayload)
+
+	sig, err := s.sign(crypto.DomainAnonymousElectionSign, domain.ObjectTypeAnonymousElection, domain.ScopeNetwork, "", createdAt, unsigned, creatorPrivKey)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+	payload.Signature = sig
+
+	encoded := domain.EncodeAnonymousElectionPayload(payload)
+	envelope, err := s.buildEnvelope(domain.ObjectTypeAnonymousElection, domain.ScopeNetwork, "", encoded, createdAt)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+
+	return s.ingestLocal(ctx, envelope, validation.StatusValid)
+}
+
+func (s *Service) CreateTrusteeConsent(ctx context.Context, payload domain.TrusteeConsentPayload, trusteePrivKey ed25519.PrivateKey, createdAt int64) (domain.ObjectEnvelope, error) {
+	if len(payload.TrusteePublicKey) == 0 {
+		payload.TrusteePublicKey = []byte(trusteePrivKey.Public().(ed25519.PublicKey))
+	}
+	unsignedPayload := payload
+	unsignedPayload.Signature = nil
+	unsigned := domain.EncodeTrusteeConsentPayload(unsignedPayload)
+
+	sig, err := s.sign(crypto.DomainTrusteeConsentSign, domain.ObjectTypeTrusteeConsent, domain.ScopeElectionID, payload.ElectionID, createdAt, unsigned, trusteePrivKey)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+	payload.Signature = sig
+
+	encoded := domain.EncodeTrusteeConsentPayload(payload)
+	envelope, err := s.buildEnvelope(domain.ObjectTypeTrusteeConsent, domain.ScopeElectionID, payload.ElectionID, encoded, createdAt)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+
+	return s.ingestLocal(ctx, envelope, validation.StatusValid)
+}
+
+func (s *Service) CreateTallyKeyContribution(ctx context.Context, electionID string, trusteePublicKey, trusteeTallySetupPublicKey []byte, finalTrustees []domain.TrusteeCandidate, trusteePrivKey ed25519.PrivateKey, createdAt int64) (domain.ObjectEnvelope, error) {
+	if len(trusteePublicKey) == 0 {
+		trusteePublicKey = []byte(trusteePrivKey.Public().(ed25519.PublicKey))
+	}
+
+	commitment := domain.DKGCommitment{
+		SenderTrusteePublicKey: append([]byte(nil), trusteePublicKey...),
+		CoefficientIndex:       0,
+		Commitment:             placeholderBytes("dkg-commit", trusteePublicKey, 32),
+	}
+
+	shares := make([]domain.DKGEncryptedShare, 0, len(finalTrustees))
+	for i, trustee := range finalTrustees {
+		setupKeyID, err := crypto.KeyID(crypto.KeyTypeTrusteeTallySetup, trustee.TrusteeTallySetupKey)
+		if err != nil {
+			return domain.ObjectEnvelope{}, fmt.Errorf("tally key contribution key id: %w", err)
+		}
+		shares = append(shares, domain.DKGEncryptedShare{
+			SenderTrusteePublicKey:    append([]byte(nil), trusteePublicKey...),
+			RecipientTrusteePublicKey: append([]byte(nil), trustee.TrusteePublicKey...),
+			RecipientTallySetupKeyID:  append([]byte(nil), setupKeyID[:]...),
+			RecipientIndex:            int64(i + 1),
+			EncryptedShare:            placeholderBytes("dkg-share", append(trusteePublicKey, trustee.TrusteePublicKey...), 16),
+			ShareEncryptionProof:      placeholderBytes("dkg-proof", append(trusteePublicKey, trustee.TrusteePublicKey...), 16),
+		})
+	}
+
+	payload := domain.TallyKeyContributionPayload{
+		ElectionID:                 electionID,
+		TrusteePublicKey:           append([]byte(nil), trusteePublicKey...),
+		TrusteeTallySetupPublicKey: append([]byte(nil), trusteeTallySetupPublicKey...),
+		DKGCommitments:             []domain.DKGCommitment{commitment},
+		DKGEncryptedShares:         shares,
+		SetupProof:                 placeholderBytes("dkg-setup-proof", trusteePublicKey, 32),
+	}
+
+	unsignedPayload := payload
+	unsignedPayload.Signature = nil
+	unsigned := domain.EncodeTallyKeyContributionPayload(unsignedPayload)
+
+	sig, err := s.sign(crypto.DomainTallyKeyContributionSign, domain.ObjectTypeTallyKeyContribution, domain.ScopeElectionID, electionID, createdAt, unsigned, trusteePrivKey)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+	payload.Signature = sig
+
+	encoded := domain.EncodeTallyKeyContributionPayload(payload)
+	envelope, err := s.buildEnvelope(domain.ObjectTypeTallyKeyContribution, domain.ScopeElectionID, electionID, encoded, createdAt)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+
+	return s.ingestLocal(ctx, envelope, validation.StatusValid)
+}
+
+func (s *Service) BuildTallyKeySet(ctx context.Context, electionID string, reporterPublicKey []byte, reporterPrivKey ed25519.PrivateKey) (domain.ObjectEnvelope, error) {
+	inputs, err := s.store.ElectionActivationInputs(ctx, electionID)
+	if err != nil {
+		return domain.ObjectEnvelope{}, fmt.Errorf("app build tally key set: %w", err)
+	}
+	if !inputs.ElectionFound || !inputs.ElectionStatus.Final() || inputs.ElectionStatus != validation.StatusValid {
+		return domain.ObjectEnvelope{}, fmt.Errorf("anonymous election %s is not valid", electionID)
+	}
+	if !inputs.ResultFound || !inputs.ResultStatus.Final() || inputs.ResultStatus != validation.StatusValid {
+		return domain.ObjectEnvelope{}, fmt.Errorf("trustee selection result for election %s is not valid", electionID)
+	}
+
+	if validation.HasDuplicateValidTrusteeConsent(inputs.Consents) {
+		return domain.ObjectEnvelope{}, fmt.Errorf("duplicate valid trustee consents for election %s", electionID)
+	}
+	finalSet, consentIDs, ok := validation.DeriveFinalTrusteeSet(inputs.Result, inputs.Consents)
+	if !ok {
+		return domain.ObjectEnvelope{}, fmt.Errorf("cannot derive final trustee set for election %s", electionID)
+	}
+
+	contributionIDs, commitments, setupProofs, contributionIssue, contributionDependencyID := validation.RetainedContributionsForTrustees(electionID, finalSet, inputs.Contributions)
+	if contributionIssue != "" {
+		return domain.ObjectEnvelope{}, fmt.Errorf("contributions issue for election %s: %s (%s)", electionID, contributionIssue, contributionDependencyID)
+	}
+
+	trusteeSetHash := validation.ComputeTrusteeSetHash(finalSet)
+	tallyPublicKey := validation.ComputeTallyPublicKey(commitments)
+
+	resultHash := inputs.Election.TrusteeSelectionResultHash
+	payload := domain.TallyKeySetPayload{
+		ElectionID:                    electionID,
+		TrusteeSelectionResultHash:    append([]byte(nil), resultHash...),
+		TrusteeSet:                    append([]domain.TrusteeCandidate(nil), finalSet...),
+		TrusteeConsentObjectIDs:       append([]string(nil), consentIDs...),
+		TallyKeyContributionObjectIDs: append([]string(nil), contributionIDs...),
+		TrusteeSetHash:                append([]byte(nil), trusteeSetHash...),
+		ThresholdT:                    domain.ThresholdV1,
+		TrusteeCountN:                 domain.TrusteeCountV1,
+		TallyPublicKey:                append([]byte(nil), tallyPublicKey...),
+		TrusteeKeyCommitments:         deepCopyBytesSlice(commitments),
+		SetupProofs:                   deepCopyBytesSlice(setupProofs),
+	}
+
+	activationHash := validation.ComputeTallyKeySetHash(payload.ElectionID, payload.TrusteeSelectionResultHash, finalSet, consentIDs, contributionIDs, commitments, tallyPublicKey)
+	payload.TallyKeySetHash = append([]byte(nil), activationHash...)
+	payload.ReporterPublicKey = append([]byte(nil), reporterPublicKey...)
+
+	unsignedPayload := payload
+	unsignedPayload.Signature = nil
+	unsigned := domain.EncodeTallyKeySetPayload(unsignedPayload)
+
+	createdAt := time.Now().UnixMilli()
+	digest, err := crypto.SigningDigest(crypto.SigningContext{
+		Domain:          crypto.DomainTallyKeySetSign,
+		ProtocolVersion: protocolVersion,
+		NetworkID:       s.networkID,
+		ObjectType:      domain.ObjectTypeTallyKeySet,
+		Scope:           domain.ScopeElectionID,
+		ScopeID:         electionID,
+		CreatedAt:       createdAt,
+	}, unsigned)
+	if err != nil {
+		return domain.ObjectEnvelope{}, fmt.Errorf("tally key set signing digest: %w", err)
+	}
+	sig, err := crypto.SignEd25519(reporterPrivKey, digest)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+	payload.Signature = sig
+
+	encoded := domain.EncodeTallyKeySetPayload(payload)
+	envelope, err := s.buildEnvelope(domain.ObjectTypeTallyKeySet, domain.ScopeElectionID, electionID, encoded, createdAt)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+
+	return s.ingestLocal(ctx, envelope, validation.StatusValid)
+}
+
+func (s *Service) TrusteeSelectionResultHash(ctx context.Context, selectionID string) ([]byte, error) {
+	resultHash, err := s.store.TrusteeSelectionResultHash(ctx, selectionID)
+	if err != nil {
+		return nil, fmt.Errorf("trustee selection result hash: %w", err)
+	}
+	return resultHash, nil
+}
+
+func (s *Service) LoadAnonymousElection(ctx context.Context, electionID string) (domain.AnonymousElectionPayload, error) {
+	inputs, err := s.store.ElectionActivationInputs(ctx, electionID)
+	if err != nil {
+		return domain.AnonymousElectionPayload{}, fmt.Errorf("load anonymous election: %w", err)
+	}
+	if !inputs.ElectionFound {
+		return domain.AnonymousElectionPayload{}, fmt.Errorf("anonymous election %s not found", electionID)
+	}
+	return inputs.Election, nil
+}
+
+func (s *Service) FinalTrusteeSet(ctx context.Context, electionID string) ([]domain.TrusteeCandidate, error) {
+	inputs, err := s.store.ElectionActivationInputs(ctx, electionID)
+	if err != nil {
+		return nil, fmt.Errorf("final trustee set: %w", err)
+	}
+	if !inputs.ElectionFound || !inputs.ElectionStatus.Final() || inputs.ElectionStatus != validation.StatusValid {
+		return nil, fmt.Errorf("anonymous election %s is not valid", electionID)
+	}
+	if !inputs.ResultFound || !inputs.ResultStatus.Final() || inputs.ResultStatus != validation.StatusValid {
+		return nil, fmt.Errorf("trustee selection result for election %s is not valid", electionID)
+	}
+	if validation.HasDuplicateValidTrusteeConsent(inputs.Consents) {
+		return nil, fmt.Errorf("duplicate valid trustee consents for election %s", electionID)
+	}
+	finalSet, _, ok := validation.DeriveFinalTrusteeSet(inputs.Result, inputs.Consents)
+	if !ok {
+		return nil, fmt.Errorf("cannot derive final trustee set for election %s", electionID)
+	}
+	return finalSet, nil
+}
+
 func (s *Service) sign(signDomain crypto.Domain, objectType domain.ObjectType, scope domain.Scope, scopeID string, createdAt int64, unsignedPayload []byte, privKey ed25519.PrivateKey) ([]byte, error) {
 	digest, err := crypto.SigningDigest(crypto.SigningContext{
 		Domain:          signDomain,
@@ -311,4 +532,26 @@ func ReadNetworkID(dataDir string) (string, error) {
 		return "", errors.New("schema metadata missing network_id")
 	}
 	return networkID, nil
+}
+
+func deepCopyBytesSlice(src [][]byte) [][]byte {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([][]byte, len(src))
+	for i, b := range src {
+		dst[i] = append([]byte(nil), b...)
+	}
+	return dst
+}
+
+func placeholderBytes(tag string, seed []byte, size int) []byte {
+	h := sha256.New()
+	h.Write([]byte(tag))
+	h.Write(seed)
+	sum := h.Sum(nil)
+	if size > len(sum) {
+		size = len(sum)
+	}
+	return sum[:size]
 }

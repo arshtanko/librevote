@@ -352,6 +352,82 @@ func TestEndToEndTrusteeSelectionFlow(t *testing.T) {
 	t.Logf("result: %s", strings.TrimSpace(stdout))
 }
 
+func TestEndToEndActivationFlow(t *testing.T) {
+	dataDir := t.TempDir()
+	run := func(args []string) (string, string, int) {
+		var stdout, stderr bytes.Buffer
+		code := Run(args, &stdout, &stderr)
+		return stdout.String(), stderr.String(), code
+	}
+
+	stdout, stderr, code := run([]string{"init", "--db", dataDir, "--network", "testnet"})
+	if code != 0 {
+		t.Fatalf("init failed: %s", stderr)
+	}
+
+	stdout, stderr, code = run([]string{"trustee-election", "create", "--db", dataDir, "--id", "ts-1", "--network", "testnet", "--title", "Test Election"})
+	if code != 0 {
+		t.Fatalf("trustee-election create failed: %s", stderr)
+	}
+
+	for _, name := range []string{"alice", "bob", "carol"} {
+		stdout, stderr, code = run([]string{"trustee", "nominate", "--db", dataDir, "--selection", "ts-1", "--name", name, "--network", "testnet"})
+		if code != 0 {
+			t.Fatalf("nominate %s failed: %s", name, stderr)
+		}
+	}
+
+	stdout, stderr, code = run([]string{"trustee", "vote", "--db", dataDir, "--selection", "ts-1", "--voter", "voter-1", "--candidates", "alice,bob", "--network", "testnet"})
+	if code != 0 {
+		t.Fatalf("vote failed: %s", stderr)
+	}
+
+	stdout, stderr, code = run([]string{"trustee", "result", "build", "--db", dataDir, "--selection", "ts-1", "--network", "testnet"})
+	if code != 0 {
+		t.Fatalf("result build failed: %s", stderr)
+	}
+
+	stdout, stderr, code = run([]string{"election", "create", "--db", dataDir, "--id", "an-1", "--title", "Anonymous", "--selection", "ts-1", "--network", "testnet"})
+	if code != 0 {
+		t.Fatalf("election create failed: %s", stderr)
+	}
+	if !strings.Contains(stdout, "status: valid") {
+		t.Fatalf("election not valid: %s", stdout)
+	}
+	t.Logf("election: %s", strings.TrimSpace(stdout))
+
+	for _, name := range []string{"alice", "bob", "carol"} {
+		stdout, stderr, code = run([]string{"trustee", "consent", "--db", dataDir, "--name", name, "--election", "an-1", "--network", "testnet"})
+		if code != 0 {
+			t.Fatalf("consent %s failed: %s", name, stderr)
+		}
+		if !strings.Contains(stdout, "status: valid") {
+			t.Fatalf("consent %s not valid: %s", name, stdout)
+		}
+		t.Logf("consent %s: %s", name, strings.TrimSpace(stdout))
+	}
+
+	for _, name := range []string{"alice", "bob", "carol"} {
+		stdout, stderr, code = run([]string{"tally-key", "contribute", "--db", dataDir, "--election", "an-1", "--name", name, "--network", "testnet"})
+		if code != 0 {
+			t.Fatalf("contribute %s failed: %s", name, stderr)
+		}
+		if !strings.Contains(stdout, "status: valid") {
+			t.Fatalf("contribution %s not valid: %s", name, stdout)
+		}
+		t.Logf("contribution %s: %s", name, strings.TrimSpace(stdout))
+	}
+
+	stdout, stderr, code = run([]string{"tally-key", "build", "--db", dataDir, "--election", "an-1", "--network", "testnet"})
+	if code != 0 {
+		t.Fatalf("tally-key build failed: %s", stderr)
+	}
+	if !strings.Contains(stdout, "status: valid") {
+		t.Fatalf("key set not valid: %s", stdout)
+	}
+	t.Logf("key set: %s", strings.TrimSpace(stdout))
+}
+
 func TestParseFlagsRejectsUnknownFlag(t *testing.T) {
 	_, err := parseFlags([]string{"--unknown", "value"}, initKnownFlags)
 	if err == nil {

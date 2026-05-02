@@ -87,6 +87,7 @@ func KnownEd25519SigningDomain(domain Domain) bool {
 	case DomainTrusteeNominationSign,
 		DomainTrusteeVoteSign,
 		DomainTrusteeSelectionElectionSign,
+		DomainAnonymousElectionSign,
 		DomainTrusteeConsentSign,
 		DomainTallyKeyContributionSign,
 		DomainTallyKeySetSign,
