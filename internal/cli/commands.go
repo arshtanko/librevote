@@ -11,8 +11,10 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"librevote/internal/app"
+	"librevote/internal/discovery"
 	"librevote/internal/domain"
 	"librevote/internal/sync"
 	"librevote/internal/transport"
@@ -899,7 +901,7 @@ func placeholderHash(tag, seed string) []byte {
 
 func cmdNode(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "error: node requires a subcommand: sync, serve")
+		fmt.Fprintln(stderr, "error: node requires a subcommand: sync, serve, discover")
 		return 2
 	}
 	switch args[0] {
@@ -907,6 +909,8 @@ func cmdNode(args []string, stdout, stderr io.Writer) int {
 		return cmdNodeSync(args[1:], stdout, stderr)
 	case "serve":
 		return cmdNodeServe(args[1:], stdout, stderr)
+	case "discover":
+		return cmdNodeDiscover(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "error: unknown node subcommand %q\n", args[0])
 		return 2
@@ -1049,6 +1053,128 @@ func cmdNodeServe(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func cmdNodeDiscover(args []string, stdout, stderr io.Writer) int {
+	flags, err := parseFlags(args, nodeDiscoverKnownFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+	dataDir := flags["db"]
+	if dataDir == "" {
+		fmt.Fprintln(stderr, "error: --db is required")
+		return 2
+	}
+
+	networkID := flags["network"]
+	if networkID == "" {
+		stored, err := app.ReadNetworkID(dataDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: --network is required (could not read stored network: %v)\n", err)
+			return 2
+		}
+		networkID = stored
+	}
+
+	bootstrapRaw := flags["bootstrap"]
+	var bootstrapPeers []string
+	if bootstrapRaw != "" {
+		for _, p := range strings.Split(bootstrapRaw, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				bootstrapPeers = append(bootstrapPeers, p)
+			}
+		}
+	}
+
+	keyPath := flags["key"]
+	if keyPath == "" {
+		keyPath = dataDir + "/node_discovery.key"
+	}
+
+	listenRaw := flags["listen"]
+	var listenAddrs []string
+	if listenRaw != "" {
+		listenAddrs = strings.Split(listenRaw, ",")
+		for i := range listenAddrs {
+			listenAddrs[i] = strings.TrimSpace(listenAddrs[i])
+		}
+	}
+
+	rendezvousPrefix := flags["rendezvous"]
+	if rendezvousPrefix == "" {
+		rendezvousPrefix = "/librevote"
+	}
+
+	mode := flags["mode"]
+	if mode == "" {
+		mode = "auto"
+	}
+	switch mode {
+	case "auto", "server", "client":
+	default:
+		fmt.Fprintf(stderr, "error: invalid --mode %q (valid: auto, server, client)\n", mode)
+		return 2
+	}
+
+	httpAdvertise := flags["http-advertise"]
+
+	config := discovery.Config{
+		NetworkID:        networkID,
+		BootstrapPeers:   bootstrapPeers,
+		KeyPath:          keyPath,
+		ListenAddrs:      listenAddrs,
+		AdvertisedHTTP:   httpAdvertise,
+		RendezvousPrefix: rendezvousPrefix,
+		Mode:             mode,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	d, err := discovery.New(ctx, config)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: create discovery: %v\n", err)
+		if len(bootstrapPeers) > 0 {
+			return 6
+		}
+		return 1
+	}
+	defer d.Close()
+
+	peers, discoverErr := d.DiscoverPeers(ctx)
+
+	fmt.Fprintf(stdout, "discovery on network %s\n", networkID)
+	fmt.Fprintf(stdout, "  local_peer_id: %s\n", d.Identity().PeerID)
+	fmt.Fprintf(stdout, "  namespace: %s\n", d.Namespace())
+	fmt.Fprintf(stdout, "  mode: %s\n", d.Config().Mode)
+	fmt.Fprintf(stdout, "  listen_addrs:\n")
+	for _, a := range d.Host().Addrs() {
+		fmt.Fprintf(stdout, "    - %s/p2p/%s\n", a, d.Identity().PeerID)
+	}
+	fmt.Fprintf(stdout, "  discovered_peers: %d\n", len(peers))
+
+	for _, p := range peers {
+		addrsStr := strings.Join(p.Addrs, ", ")
+		if p.HTTPURL != "" {
+			fmt.Fprintf(stdout, "    - %s addrs=[%s] http=%s\n", p.PeerID, addrsStr, p.HTTPURL)
+		} else {
+			fmt.Fprintf(stdout, "    - %s addrs=[%s]\n", p.PeerID, addrsStr)
+		}
+	}
+
+	if discoverErr != nil {
+		fmt.Fprintf(stderr, "warning: discovery errors: %v\n", discoverErr)
+	}
+
+	if len(bootstrapPeers) > 0 && len(peers) == 0 && discoverErr != nil {
+		if !strings.Contains(discoverErr.Error(), "http url not") {
+			return 6
+		}
+	}
+
+	return 0
+}
+
 var initKnownFlags = flagSet("db", "network")
 
 var trusteeElectionCreateKnownFlags = flagSet("db", "id", "network", "title")
@@ -1076,6 +1202,8 @@ var tallyShowKnownFlags = flagSet("db", "election", "network")
 var nodeSyncKnownFlags = flagSet("db", "peer", "scope", "scope-id", "network")
 
 var nodeServeKnownFlags = flagSet("db", "listen", "network")
+
+var nodeDiscoverKnownFlags = flagSet("db", "bootstrap", "listen", "key", "network", "rendezvous", "mode", "http-advertise")
 
 func flagSet(names ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(names))

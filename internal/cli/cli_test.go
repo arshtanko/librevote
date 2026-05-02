@@ -139,6 +139,7 @@ func assertUsage(t *testing.T, out string) {
 		"librevote trustee result build",
 		"librevote node sync",
 		"librevote node serve",
+		"librevote node discover",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout missing %q in:\n%s", want, out)
@@ -606,6 +607,9 @@ func TestNodeNoSubcommand(t *testing.T) {
 	if !strings.Contains(stderr.String(), "node requires a subcommand") {
 		t.Fatalf("stderr = %q; want subcommand error", stderr.String())
 	}
+	if !strings.Contains(stderr.String(), "discover") {
+		t.Fatalf("stderr missing 'discover' in subcommand list: %q", stderr.String())
+	}
 }
 
 func TestNodeUnknownSubcommand(t *testing.T) {
@@ -854,4 +858,262 @@ func TestNodeSyncSuccessWithHTTPServer(t *testing.T) {
 		t.Fatal("expected objects from trustee_selection_id scope sync")
 	}
 	t.Logf("node B scoped objects: %d", len(refsScoped))
+}
+
+func TestNodeDiscoverMissingDB(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"node", "discover"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run() exit code = %d; want 2", code)
+	}
+	if got, want := stderr.String(), "error: --db is required\n"; got != want {
+		t.Fatalf("stderr = %q; want %q", got, want)
+	}
+}
+
+func TestNodeDiscoverHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run() exit code = %d; want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "node discover") {
+		t.Fatalf("help missing node discover: %s", stdout.String())
+	}
+}
+
+func TestNodeDiscoverNetworkAutoDetect(t *testing.T) {
+	dataDir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"init", "--db", dataDir, "--network", "testnet"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init failed: %s", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"node", "discover", "--db", dataDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("node discover failed: code=%d stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "discovery on network testnet") {
+		t.Fatalf("output missing network: %s", out)
+	}
+	if !strings.Contains(out, "local_peer_id:") {
+		t.Fatalf("output missing local_peer_id: %s", out)
+	}
+	if !strings.Contains(out, "namespace: /librevote/testnet/v1") {
+		t.Fatalf("output missing namespace: %s", out)
+	}
+	if !strings.Contains(out, "discovered_peers: 0") {
+		t.Fatalf("output missing discovered_peers: %s", out)
+	}
+}
+
+func TestNodeDiscoverWithBootstrapFlag(t *testing.T) {
+	dataDir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"init", "--db", dataDir, "--network", "testnet"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init failed: %s", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"node", "discover",
+		"--db", dataDir,
+		"--listen", "/ip4/127.0.0.1/tcp/0",
+		"--bootstrap", "/ip4/127.0.0.1/tcp/1/p2p/12D3KooWBadPeerId",
+		"--key", dataDir + "/key",
+		"--rendezvous", "/custom",
+		"--mode", "client",
+	}, &stdout, &stderr)
+	if code != 6 {
+		t.Fatalf("expected exit code 6 for unreachable bootstrap peer, got %d: stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "bootstrap") {
+		t.Fatalf("stderr missing bootstrap error: %s", stderr.String())
+	}
+}
+
+func TestNodeDiscoverInvalidBootstrapMultiaddr(t *testing.T) {
+	dataDir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"init", "--db", dataDir, "--network", "testnet"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init failed: %s", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"node", "discover",
+		"--db", dataDir,
+		"--bootstrap", "garbage-not-a-multiaddr",
+	}, &stdout, &stderr)
+	if code != 6 {
+		t.Fatalf("expected exit code 6 for invalid bootstrap multiaddr, got %d: stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "bootstrap") {
+		t.Fatalf("stderr missing bootstrap error: %s", stderr.String())
+	}
+}
+
+func TestNodeDiscoverNoBootstrapSelfInfo(t *testing.T) {
+	dataDir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"init", "--db", dataDir, "--network", "testnet"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init failed: %s", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"node", "discover", "--db", dataDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("no-bootstrap discover should succeed: code=%d stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "discovery on network testnet") {
+		t.Fatalf("output missing network: %s", out)
+	}
+	if !strings.Contains(out, "local_peer_id:") {
+		t.Fatalf("output missing local_peer_id: %s", out)
+	}
+	if !strings.Contains(out, "discovered_peers: 0") {
+		t.Fatalf("output missing discovered_peers: %s", out)
+	}
+	if !strings.Contains(out, "mode: auto") {
+		t.Fatalf("output missing mode: %s", out)
+	}
+}
+
+func TestNodeDiscoverUnknownFlags(t *testing.T) {
+	dataDir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"init", "--db", dataDir, "--network", "testnet"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init failed: %s", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"node", "discover", "--db", dataDir, "--unknown-flag", "val"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit code 2 for unknown flag, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "unknown flag") {
+		t.Fatalf("expected unknown flag error, got: %s", stderr.String())
+	}
+}
+
+func TestNodeDiscoverValidatesModeFlag(t *testing.T) {
+	dataDir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"init", "--db", dataDir, "--network", "testnet"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init failed: %s", stderr.String())
+	}
+
+	for _, mode := range []string{"auto", "server", "client"} {
+		t.Run(mode, func(t *testing.T) {
+			stdout.Reset()
+			stderr.Reset()
+			code := Run([]string{
+				"node", "discover",
+				"--db", dataDir,
+				"--mode", mode,
+			}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("mode=%q failed: code=%d stderr=%s", mode, code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "mode: "+mode) {
+				t.Fatalf("output missing effective mode %q: %s", mode, stdout.String())
+			}
+		})
+	}
+}
+
+func TestNodeDiscoverRejectsInvalidMode(t *testing.T) {
+	dataDir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"init", "--db", dataDir, "--network", "testnet"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init failed: %s", stderr.String())
+	}
+
+	for _, mode := range []string{"invalid", "automatic", "peer", ""} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			args := []string{"node", "discover", "--db", dataDir}
+			if mode != "" {
+				args = append(args, "--mode", mode)
+			}
+			stdout.Reset()
+			stderr.Reset()
+			code := Run(args, &stdout, &stderr)
+			if mode == "" {
+				// Empty mode defaults to "auto" which is valid
+				if code != 0 {
+					t.Fatalf("empty mode (defaults to auto) should succeed: code=%d stderr=%s", code, stderr.String())
+				}
+				if !strings.Contains(stdout.String(), "mode: auto") {
+					t.Fatalf("output missing default mode auto: %s", stdout.String())
+				}
+			} else {
+				if code != 2 {
+					t.Fatalf("mode=%q should exit 2, got %d", mode, code)
+				}
+				if !strings.Contains(stderr.String(), "invalid --mode") {
+					t.Fatalf("stderr missing invalid mode error for %q: %s", mode, stderr.String())
+				}
+			}
+		})
+	}
+}
+
+func TestNodeDiscoverHTTPAdvertiseFlag(t *testing.T) {
+	dataDir := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"init", "--db", dataDir, "--network", "testnet"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init failed: %s", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"node", "discover",
+		"--db", dataDir,
+		"--http-advertise", "http://myhost:9090",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("discover with http-advertise failed: code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "discovery on network testnet") {
+		t.Fatalf("output missing discovery: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "local_peer_id:") {
+		t.Fatalf("output missing local_peer_id: %s", stdout.String())
+	}
+}
+
+func TestNodeDiscoverNetworkRequiredNoDB(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"node", "discover", "--db", "/nonexistent/path"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "--network is required") {
+		t.Fatalf("expected network required, got: %s", stderr.String())
+	}
 }
