@@ -80,6 +80,10 @@ func (s *Store) DependencyStatus(ctx context.Context, dep validation.Dependency)
 		return s.statusForTrusteeConsentDependency(ctx, dep.ID)
 	case "tally_key_contribution":
 		return s.statusForTallyKeyContributionDependency(ctx, dep.ID)
+	case "tally_key_set":
+		return s.statusForTallyKeySetDependency(ctx, dep.ID)
+	case "anonymous_ballot":
+		return s.ValidationStatus(ctx, dep.ID)
 	default:
 		return s.ValidationStatus(ctx, dep.ID)
 	}
@@ -661,6 +665,127 @@ func (s *Store) tallyKeyContributions(ctx context.Context, electionID string) ([
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read tally key contributions: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) statusForTallyKeySetDependency(ctx context.Context, id string) (validation.Status, bool, error) {
+	electionID, err := validation.ParseTallyKeySetDependencyID(id)
+	if err != nil {
+		if status, found, err := s.ValidationStatus(ctx, id); found || err != nil {
+			return status, found, err
+		}
+		return "", false, nil
+	}
+	return s.statusForDecodedPayload(ctx, domain.ObjectTypeTallyKeySet, func(payload []byte) (bool, error) {
+		decoded, err := domain.DecodePayload(domain.ObjectTypeTallyKeySet, payload)
+		if err != nil {
+			return false, err
+		}
+		tks := decoded.(domain.TallyKeySetPayload)
+		return tks.ElectionID == electionID, nil
+	})
+}
+
+func (s *Store) BallotValidationInputs(ctx context.Context, electionID string) (validation.BallotValidationInputs, error) {
+	if electionID == "" {
+		return validation.BallotValidationInputs{}, errors.New("election_id is required")
+	}
+	election, electionStatus, electionFound, err := s.anonymousElectionByID(ctx, electionID)
+	if err != nil {
+		return validation.BallotValidationInputs{}, err
+	}
+	inputs := validation.BallotValidationInputs{ElectionFound: electionFound, ElectionStatus: electionStatus, Election: election}
+	if electionFound {
+		tksPayload, tksStatus, tksFound, err := s.validTallyKeySetForElection(ctx, electionID)
+		if err != nil {
+			return validation.BallotValidationInputs{}, err
+		}
+		if tksFound && tksStatus == validation.StatusValid {
+			inputs.TallyKeySetFound = true
+			inputs.TallyKeySetHash = tksPayload.TallyKeySetHash
+		}
+	}
+	ballots, err := s.electionBallots(ctx, electionID)
+	if err != nil {
+		return validation.BallotValidationInputs{}, err
+	}
+	inputs.ExistingBallots = ballots
+	return inputs, nil
+}
+
+func (s *Store) TallyComputationInputs(ctx context.Context, electionID string) (validation.TallyComputationInputs, error) {
+	baseInputs, err := s.BallotValidationInputs(ctx, electionID)
+	if err != nil {
+		return validation.TallyComputationInputs{}, err
+	}
+	return validation.TallyComputationInputs{
+		BallotValidationInputs: baseInputs,
+		RetainedBallots:        baseInputs.ExistingBallots,
+	}, nil
+}
+
+func (s *Store) validTallyKeySetForElection(ctx context.Context, electionID string) (domain.TallyKeySetPayload, validation.Status, bool, error) {
+	var out domain.TallyKeySetPayload
+	status, found, err := s.payloadForDecodedPayload(ctx, domain.ObjectTypeTallyKeySet, func(payload []byte) (bool, error) {
+		decoded, err := domain.DecodePayload(domain.ObjectTypeTallyKeySet, payload)
+		if err != nil {
+			return false, err
+		}
+		tks := decoded.(domain.TallyKeySetPayload)
+		if tks.ElectionID != electionID {
+			return false, nil
+		}
+		out = tks
+		return true, nil
+	})
+	if status != validation.StatusValid && found {
+		return out, status, true, nil
+	}
+	return out, status, found, err
+}
+
+func (s *Store) electionBallots(ctx context.Context, electionID string) ([]validation.BallotInput, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT o.object_id, vr.validation_status, op.payload_bytes
+		 FROM objects o
+		 JOIN validation_records vr ON vr.object_id = o.object_id
+		 LEFT JOIN object_payloads op ON op.object_id = o.object_id
+		 WHERE o.object_type = ? AND o.scope = ? AND o.scope_id = ?
+		 ORDER BY o.object_id`,
+		string(domain.ObjectTypeAnonymousBallot), string(domain.ScopeElectionID), electionID)
+	if err != nil {
+		return nil, fmt.Errorf("query election ballots: %w", err)
+	}
+	defer rows.Close()
+
+	var out []validation.BallotInput
+	for rows.Next() {
+		var objectID, rawStatus string
+		var payload []byte
+		if err := rows.Scan(&objectID, &rawStatus, &payload); err != nil {
+			return nil, fmt.Errorf("scan ballot: %w", err)
+		}
+		status, err := validation.ParseStatus(rawStatus)
+		if err != nil {
+			return nil, err
+		}
+		input := validation.BallotInput{ObjectID: objectID, Status: status}
+		if status.Final() && len(payload) > 0 {
+			decoded, err := domain.DecodePayload(domain.ObjectTypeAnonymousBallot, payload)
+			if err != nil {
+				return nil, fmt.Errorf("decode ballot %s: %w", objectID, err)
+			}
+			ballot := decoded.(domain.AnonymousBallotPayload)
+			if ballot.ElectionID != electionID {
+				continue
+			}
+			input.Payload = ballot
+		}
+		out = append(out, input)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read election ballots: %w", err)
 	}
 	return out, nil
 }

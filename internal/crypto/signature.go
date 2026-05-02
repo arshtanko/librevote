@@ -91,6 +91,8 @@ func KnownEd25519SigningDomain(domain Domain) bool {
 		DomainTrusteeConsentSign,
 		DomainTallyKeyContributionSign,
 		DomainTallyKeySetSign,
+		DomainAnonymousBallotSign,
+		DomainTallyResultSign,
 		DomainElectionParameters:
 		return true
 	default:

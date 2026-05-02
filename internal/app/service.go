@@ -400,6 +400,81 @@ func (s *Service) BuildTallyKeySet(ctx context.Context, electionID string, repor
 	return s.ingestLocal(ctx, envelope, validation.StatusValid)
 }
 
+func (s *Service) CastBallot(ctx context.Context, electionID, voterID, choice string, voterPrivKey ed25519.PrivateKey, createdAt int64) (domain.ObjectEnvelope, error) {
+	payload := domain.AnonymousBallotPayload{
+		ElectionID:     electionID,
+		Choice:         choice,
+		VoterID:        voterID,
+		VoterPublicKey: []byte(voterPrivKey.Public().(ed25519.PublicKey)),
+	}
+	unsignedPayload := payload
+	unsignedPayload.Signature = nil
+	unsigned := domain.EncodeAnonymousBallotPayload(unsignedPayload)
+
+	sig, err := s.sign(crypto.DomainAnonymousBallotSign, domain.ObjectTypeAnonymousBallot, domain.ScopeElectionID, electionID, createdAt, unsigned, voterPrivKey)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+	payload.Signature = sig
+
+	encoded := domain.EncodeAnonymousBallotPayload(payload)
+	envelope, err := s.buildEnvelope(domain.ObjectTypeAnonymousBallot, domain.ScopeElectionID, electionID, encoded, createdAt)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+
+	return s.ingestLocal(ctx, envelope, validation.StatusValidForTally)
+}
+
+func (s *Service) BuildTallyResult(ctx context.Context, electionID string, reporterPublicKey []byte, reporterPrivKey ed25519.PrivateKey, createdAt int64) (domain.ObjectEnvelope, error) {
+	inputs, err := s.store.TallyComputationInputs(ctx, electionID)
+	if err != nil {
+		return domain.ObjectEnvelope{}, fmt.Errorf("app build tally result: %w", err)
+	}
+	if !inputs.ElectionFound || !inputs.ElectionStatus.Final() || inputs.ElectionStatus != validation.StatusValid {
+		return domain.ObjectEnvelope{}, fmt.Errorf("anonymous election %s is not valid", electionID)
+	}
+	if !inputs.TallyKeySetFound {
+		return domain.ObjectEnvelope{}, fmt.Errorf("no valid TallyKeySet for election %s", electionID)
+	}
+
+	computed := validation.ComputeLocalTallyResultForService(electionID, inputs.TallyKeySetHash, inputs.RetainedBallots, inputs.Election.Options)
+	computed.ReporterPublicKey = append([]byte(nil), reporterPublicKey...)
+
+	unsignedPayload := computed
+	unsignedPayload.Signature = nil
+	unsigned := domain.EncodeTallyResultPayload(unsignedPayload)
+	digest, err := crypto.SigningDigest(crypto.SigningContext{
+		Domain:          crypto.DomainTallyResultSign,
+		ProtocolVersion: protocolVersion,
+		NetworkID:       s.networkID,
+		ObjectType:      domain.ObjectTypeTallyResult,
+		Scope:           domain.ScopeElectionID,
+		ScopeID:         electionID,
+		CreatedAt:       createdAt,
+	}, unsigned)
+	if err != nil {
+		return domain.ObjectEnvelope{}, fmt.Errorf("tally result signing digest: %w", err)
+	}
+	sig, err := crypto.SignEd25519(reporterPrivKey, digest)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+	computed.Signature = sig
+
+	encoded := domain.EncodeTallyResultPayload(computed)
+	envelope, err := s.buildEnvelope(domain.ObjectTypeTallyResult, domain.ScopeElectionID, electionID, encoded, createdAt)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+
+	return s.ingestLocal(ctx, envelope, validation.StatusValid)
+}
+
+func (s *Service) GetTallyComputationInputs(ctx context.Context, electionID string) (validation.TallyComputationInputs, error) {
+	return s.store.TallyComputationInputs(ctx, electionID)
+}
+
 func (s *Service) TrusteeSelectionResultHash(ctx context.Context, selectionID string) ([]byte, error) {
 	resultHash, err := s.store.TrusteeSelectionResultHash(ctx, selectionID)
 	if err != nil {

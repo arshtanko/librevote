@@ -159,7 +159,6 @@ func TestContextualValidatorRunnerDoesNotPersistUnsupportedObjectType(t *testing
 		payload    []byte
 	}{
 		{name: "blind token issue", objectType: domain.ObjectTypeBlindTokenIssue, scope: domain.ScopeElectionID, scopeID: "election-1", payload: []byte{0x0a, 0x08, 'e', 'l', 'e', 'c', 't', 'i', 'o', 'n'}},
-		{name: "tally result", objectType: domain.ObjectTypeTallyResult, scope: domain.ScopeElectionID, scopeID: "election-1", payload: []byte{0x0a, 0x08, 'e', 'l', 'e', 'c', 't', 'i', 'o', 'n'}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

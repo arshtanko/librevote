@@ -161,6 +161,30 @@ type TallyKeySetPayload struct {
 	Signature                     []byte
 }
 
+type AnonymousBallotPayload struct {
+	ElectionID     string
+	Choice         string
+	VoterID        string
+	VoterPublicKey []byte
+	Signature      []byte
+}
+
+type OptionResult struct {
+	Option string
+	Count  int64
+}
+
+type TallyResultPayload struct {
+	ElectionID            string
+	TallyKeySetHash       []byte
+	OptionResults         []OptionResult
+	ValidBallotCount      int64
+	ConflictedBallotCount int64
+	ResultHash            []byte
+	ReporterPublicKey     []byte
+	Signature             []byte
+}
+
 // DecodePayload decodes the implemented v1 canonical protobuf payload subset.
 func DecodePayload(objectType ObjectType, payload []byte) (any, error) {
 	if err := ValidateCanonicalPayloadWire(payload); err != nil {
@@ -183,6 +207,10 @@ func DecodePayload(objectType ObjectType, payload []byte) (any, error) {
 		return decodeTallyKeyContribution(payload)
 	case ObjectTypeTallyKeySet:
 		return decodeTallyKeySet(payload)
+	case ObjectTypeAnonymousBallot:
+		return decodeAnonymousBallot(payload)
+	case ObjectTypeTallyResult:
+		return decodeTallyResult(payload)
 	default:
 		return nil, fmt.Errorf("payload decoder for %s is not implemented", objectType)
 	}
@@ -211,6 +239,10 @@ func ValidatePayloadShape(objectType ObjectType, payload []byte) error {
 		return validateTallyKeyContribution(p)
 	case TallyKeySetPayload:
 		return validateTallyKeySet(p)
+	case AnonymousBallotPayload:
+		return validateAnonymousBallotShape(p)
+	case TallyResultPayload:
+		return validateTallyResultShape(p)
 	default:
 		return fmt.Errorf("unsupported decoded payload %T", decoded)
 	}
@@ -517,6 +549,113 @@ func decodeTallyKeySet(payload []byte) (TallyKeySetPayload, error) {
 		return nil
 	})
 	return p, err
+}
+
+func decodeAnonymousBallot(payload []byte) (AnonymousBallotPayload, error) {
+	var p AnonymousBallotPayload
+	seen := map[uint64]struct{}{}
+	err := rangeProtoFields(payload, func(field uint64, wire uint64, value []byte) error {
+		switch field {
+		case 1:
+			return setString(seen, field, wire, value, &p.ElectionID)
+		case 2:
+			return setString(seen, field, wire, value, &p.Choice)
+		case 3:
+			return setString(seen, field, wire, value, &p.VoterID)
+		case 4:
+			return setBytes(seen, field, wire, value, &p.VoterPublicKey)
+		case 5:
+			return setBytes(seen, field, wire, value, &p.Signature)
+		default:
+			return unknownField(field)
+		}
+	})
+	return p, err
+}
+
+func decodeOptionResult(payload []byte) (OptionResult, error) {
+	var r OptionResult
+	seen := map[uint64]struct{}{}
+	err := rangeProtoFields(payload, func(field uint64, wire uint64, value []byte) error {
+		switch field {
+		case 1:
+			return setString(seen, field, wire, value, &r.Option)
+		case 2:
+			return setInt64(seen, field, wire, value, &r.Count)
+		default:
+			return unknownField(field)
+		}
+	})
+	return r, err
+}
+
+func decodeTallyResult(payload []byte) (TallyResultPayload, error) {
+	var p TallyResultPayload
+	seen := map[uint64]struct{}{}
+	err := rangeProtoFields(payload, func(field uint64, wire uint64, value []byte) error {
+		switch field {
+		case 1:
+			return setString(seen, field, wire, value, &p.ElectionID)
+		case 2:
+			return setBytes(seen, field, wire, value, &p.TallyKeySetHash)
+		case 3:
+			r, err := decodeOptionResult(value)
+			if err != nil {
+				return err
+			}
+			p.OptionResults = append(p.OptionResults, r)
+		case 4:
+			return setInt64(seen, field, wire, value, &p.ValidBallotCount)
+		case 5:
+			return setInt64(seen, field, wire, value, &p.ConflictedBallotCount)
+		case 6:
+			return setBytes(seen, field, wire, value, &p.ResultHash)
+		case 7:
+			return setBytes(seen, field, wire, value, &p.ReporterPublicKey)
+		case 8:
+			return setBytes(seen, field, wire, value, &p.Signature)
+		default:
+			return unknownField(field)
+		}
+		return nil
+	})
+	return p, err
+}
+
+func validateAnonymousBallotShape(p AnonymousBallotPayload) error {
+	if p.ElectionID == "" || p.Choice == "" || p.VoterID == "" {
+		return errors.New("required anonymous ballot fields are missing")
+	}
+	if len(p.VoterPublicKey) != ed25519PublicKeySize {
+		return errors.New("invalid anonymous ballot public key size")
+	}
+	if len(p.Signature) != ed25519SignatureSize {
+		return errors.New("invalid anonymous ballot signature size")
+	}
+	return nil
+}
+
+func validateTallyResultShape(p TallyResultPayload) error {
+	if p.ElectionID == "" || len(p.TallyKeySetHash) != hashSize || len(p.ResultHash) != hashSize {
+		return errors.New("required tally result fields are missing")
+	}
+	if len(p.OptionResults) == 0 {
+		return errors.New("tally result must contain at least one option result")
+	}
+	if p.ValidBallotCount < 0 || p.ConflictedBallotCount < 0 {
+		return errors.New("tally result counts must not be negative")
+	}
+	seenOptions := map[string]struct{}{}
+	for _, r := range p.OptionResults {
+		if r.Option == "" || r.Count < 0 {
+			return errors.New("invalid tally option result")
+		}
+		if _, ok := seenOptions[r.Option]; ok {
+			return errors.New("duplicate tally option result")
+		}
+		seenOptions[r.Option] = struct{}{}
+	}
+	return validatePublicSignature(p.ReporterPublicKey, p.Signature)
 }
 
 func validateTrusteeSelectionElection(p TrusteeSelectionElectionPayload) error {
@@ -1248,3 +1387,39 @@ func EncodeTallyKeySetPayload(p TallyKeySetPayload) []byte {
 }
 
 func TallyKeySetSignatureField() uint64 { return 14 }
+
+func EncodeAnonymousBallotPayload(p AnonymousBallotPayload) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, p.ElectionID)
+	b.stringField(2, p.Choice)
+	b.stringField(3, p.VoterID)
+	b.bytesField(4, p.VoterPublicKey)
+	b.bytesField(5, p.Signature)
+	return b.Bytes()
+}
+
+func AnonymousBallotSignatureField() uint64 { return 5 }
+
+func encodeOptionResult(r OptionResult) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, r.Option)
+	b.int64Field(2, r.Count)
+	return b.Bytes()
+}
+
+func EncodeTallyResultPayload(p TallyResultPayload) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, p.ElectionID)
+	b.bytesField(2, p.TallyKeySetHash)
+	for _, r := range p.OptionResults {
+		b.subMessageField(3, encodeOptionResult(r))
+	}
+	b.int64Field(4, p.ValidBallotCount)
+	b.int64Field(5, p.ConflictedBallotCount)
+	b.bytesField(6, p.ResultHash)
+	b.bytesField(7, p.ReporterPublicKey)
+	b.bytesField(8, p.Signature)
+	return b.Bytes()
+}
+
+func TallyResultSignatureField() uint64 { return 8 }

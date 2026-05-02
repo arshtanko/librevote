@@ -25,6 +25,9 @@ Commands:
   librevote election create --db <path> --id <id> --title <title> --selection <id> [--options <opts>] [--network <id>]
   librevote tally-key contribute --db <path> --election <id> --name <name> [--network <id>]
   librevote tally-key build --db <path> --election <id> [--network <id>]
+  librevote ballot cast --db <path> --election <id> --voter <label> --choice <option> [--network <id>]
+  librevote tally build --db <path> --election <id> [--network <id>]
+  librevote tally show --db <path> --election <id> [--network <id>]
   librevote node sync --db <path> --peer <url> [--scope <scope>] [--scope-id <id>] [--network <id>]
   librevote node serve --db <path> --listen <addr> [--network <id>]
 `
@@ -61,6 +64,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cmdElection(args[1:], stdout, stderr)
 	case "tally-key":
 		return cmdTallyKey(args[1:], stdout, stderr)
+	case "ballot":
+		return cmdBallot(args[1:], stdout, stderr)
+	case "tally":
+		return cmdTally(args[1:], stdout, stderr)
 	case "node":
 		return cmdNode(args[1:], stdout, stderr)
 	default:

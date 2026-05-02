@@ -697,6 +697,199 @@ func cmdTallyKeyBuild(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func cmdBallot(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "error: ballot requires a subcommand: cast")
+		return 2
+	}
+	switch args[0] {
+	case "cast":
+		return cmdBallotCast(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "error: unknown ballot subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func cmdBallotCast(args []string, stdout, stderr io.Writer) int {
+	flags, err := parseFlags(args, ballotCastKnownFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+	dataDir := flags["db"]
+	electionID := flags["election"]
+	voterLabel := normalizeVoterLabel(flags["voter"])
+	choice := flags["choice"]
+	if dataDir == "" || electionID == "" || voterLabel == "" || choice == "" {
+		fmt.Fprintln(stderr, "error: --db, --election, --voter, and --choice are required")
+		return 2
+	}
+	networkID := flags["network"]
+	if networkID == "" {
+		stored, err := app.ReadNetworkID(dataDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: --network is required (could not read stored network: %v)\n", err)
+			return 2
+		}
+		networkID = stored
+	}
+
+	svc, err := app.Open(dataDir, networkID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: open failed: %v\n", err)
+		return 1
+	}
+	defer svc.Close()
+
+	ctx := context.Background()
+
+	voterPriv := demoEd25519PrivFromName(voterLabel)
+
+	envelope, err := svc.CastBallot(ctx, electionID, voterLabel, choice, voterPriv, 9500)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: cast ballot failed: %v\n", err)
+		return 5
+	}
+
+	fmt.Fprintf(stdout, "created %s\n", envelope.ObjectID)
+	fmt.Fprintf(stdout, "  type: %s\n", envelope.ObjectType)
+	fmt.Fprintf(stdout, "  election: %s\n", electionID)
+	fmt.Fprintf(stdout, "  voter: %s\n", voterLabel)
+	fmt.Fprintf(stdout, "  choice: %s\n", choice)
+	status, _, err := svc.ValidationStatus(ctx, envelope.ObjectID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: check status failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "  status: %s\n", status)
+	return 0
+}
+
+func cmdTally(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "error: tally requires a subcommand: build, show")
+		return 2
+	}
+	switch args[0] {
+	case "build":
+		return cmdTallyBuild(args[1:], stdout, stderr)
+	case "show":
+		return cmdTallyShow(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "error: unknown tally subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func cmdTallyBuild(args []string, stdout, stderr io.Writer) int {
+	flags, err := parseFlags(args, tallyBuildKnownFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+	dataDir := flags["db"]
+	electionID := flags["election"]
+	if dataDir == "" || electionID == "" {
+		fmt.Fprintln(stderr, "error: --db and --election are required")
+		return 2
+	}
+	networkID := flags["network"]
+	if networkID == "" {
+		stored, err := app.ReadNetworkID(dataDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: --network is required (could not read stored network: %v)\n", err)
+			return 2
+		}
+		networkID = stored
+	}
+
+	svc, err := app.Open(dataDir, networkID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: open failed: %v\n", err)
+		return 1
+	}
+	defer svc.Close()
+
+	ctx := context.Background()
+
+	reporterPub := demoEd25519PubFromName("reporter")
+	reporterPriv := demoEd25519PrivFromName("reporter")
+
+	envelope, err := svc.BuildTallyResult(ctx, electionID, reporterPub, reporterPriv, 12000)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: build tally result failed: %v\n", err)
+		return 5
+	}
+
+	fmt.Fprintf(stdout, "created %s\n", envelope.ObjectID)
+	fmt.Fprintf(stdout, "  type: %s\n", envelope.ObjectType)
+	fmt.Fprintf(stdout, "  election: %s\n", electionID)
+	status, _, err := svc.ValidationStatus(ctx, envelope.ObjectID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: check status failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "  status: %s\n", status)
+	return 0
+}
+
+func cmdTallyShow(args []string, stdout, stderr io.Writer) int {
+	flags, err := parseFlags(args, tallyShowKnownFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+	dataDir := flags["db"]
+	electionID := flags["election"]
+	if dataDir == "" || electionID == "" {
+		fmt.Fprintln(stderr, "error: --db and --election are required")
+		return 2
+	}
+	networkID := flags["network"]
+	if networkID == "" {
+		stored, err := app.ReadNetworkID(dataDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: --network is required (could not read stored network: %v)\n", err)
+			return 2
+		}
+		networkID = stored
+	}
+
+	svc, err := app.Open(dataDir, networkID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: open failed: %v\n", err)
+		return 1
+	}
+	defer svc.Close()
+
+	ctx := context.Background()
+
+	inputs, err := svc.GetTallyComputationInputs(ctx, electionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: load tally inputs: %v\n", err)
+		return 5
+	}
+	if !inputs.ElectionFound {
+		fmt.Fprintln(stderr, "error: election not found")
+		return 7
+	}
+	if !inputs.TallyKeySetFound {
+		fmt.Fprintln(stderr, "error: no valid TallyKeySet - tally not available")
+		return 7
+	}
+
+	computed := validation.ComputeLocalTallyResultForService(electionID, inputs.TallyKeySetHash, inputs.RetainedBallots, inputs.Election.Options)
+	fmt.Fprintf(stdout, "tally for election %s\n", electionID)
+	fmt.Fprintf(stdout, "  valid_ballot_count: %d\n", computed.ValidBallotCount)
+	fmt.Fprintf(stdout, "  conflicted_ballot_count: %d\n", computed.ConflictedBallotCount)
+	fmt.Fprintf(stdout, "  option_results:\n")
+	for _, r := range computed.OptionResults {
+		fmt.Fprintf(stdout, "    %s: %d\n", r.Option, r.Count)
+	}
+	return 0
+}
+
 func placeholderHash(tag, seed string) []byte {
 	h := sha256.New()
 	h.Write([]byte(tag))
@@ -873,6 +1066,12 @@ var electionCreateKnownFlags = flagSet("db", "id", "title", "selection", "option
 var tallyKeyContributeKnownFlags = flagSet("db", "election", "name", "network")
 
 var tallyKeyBuildKnownFlags = flagSet("db", "election", "network")
+
+var ballotCastKnownFlags = flagSet("db", "election", "voter", "choice", "network")
+
+var tallyBuildKnownFlags = flagSet("db", "election", "network")
+
+var tallyShowKnownFlags = flagSet("db", "election", "network")
 
 var nodeSyncKnownFlags = flagSet("db", "peer", "scope", "scope-id", "network")
 

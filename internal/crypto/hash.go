@@ -34,6 +34,9 @@ const (
 	DomainElectionParameters           Domain = "librevote-election-parameters-v1"
 	DomainDKGShareEncryption           Domain = "librevote-dkg-share-encryption-v1"
 	DomainTallyKeySetHash              Domain = "librevote-tally-key-set-hash-v1"
+	DomainAnonymousBallotSign          Domain = "librevote-anonymous-ballot-sign-v1"
+	DomainTallyResultSign              Domain = "librevote-tally-result-sign-v1"
+	DomainTallyResultHash              Domain = "librevote-tally-result-hash-v1"
 	DomainKeyEncryption                Domain = "librevote-key-encryption-v1"
 	DomainKeyID                        Domain = "librevote-key-id-v1"
 )

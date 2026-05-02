@@ -82,9 +82,9 @@ func defaultStructuralChecks() map[domain.ObjectType]structuralCheck {
 		domain.ObjectTypeTallyKeySet:              typed,
 		domain.ObjectTypeBlindTokenRequest:        check,
 		domain.ObjectTypeBlindTokenIssue:          check,
-		domain.ObjectTypeAnonymousBallot:          check,
+		domain.ObjectTypeAnonymousBallot:          typed,
 		domain.ObjectTypeTallyDecryptionShare:     check,
-		domain.ObjectTypeTallyResult:              check,
+		domain.ObjectTypeTallyResult:              typed,
 	}
 }
 
