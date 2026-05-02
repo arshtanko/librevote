@@ -166,3 +166,27 @@ Completion criteria:
 
 - A fresh node can join, discover peers, receive announcements, fetch objects and display the final tally.
 - The old local CLI workflow still works for deterministic test setup.
+
+## Stage 10. Docker Demo Frontend
+
+Goal: provide a practical demonstration frontend that runs with LibreVote nodes in Docker containers.
+
+Scope:
+
+- Treat the frontend as demo-only, not as the production authority boundary.
+- Use simplified HTTP APIs around existing CLI, app-service and node functionality where that keeps the demo small.
+- Keep object creation, ingestion, storage and validation inside the node/application layer.
+
+Milestones:
+
+- Container topology: define a Docker Compose setup with two or three LibreVote node containers, one frontend container and persistent per-node data volumes.
+- HTTP/API boundary: expose minimal local node endpoints for demo actions, object/status queries, peer visibility and tally display; avoid exposing raw storage mutation from the frontend.
+- Frontend UI screens: add screens for node status, election creation, trustee-selection flow, ballot casting, sync progress and final tally display.
+- Demo orchestration: provide one command to build/start the containers, seed a deterministic demo flow when requested and reset demo data between runs.
+- Tests/smoke checks: add smoke checks that start the Compose topology, verify frontend reachability, create or seed an election, confirm cross-node sync and display the tally.
+
+Completion criteria:
+
+- A presenter can start the full demo with Docker and use the browser UI without manual CLI steps.
+- The demo still exercises real node storage, validation and P2P synchronization paths.
+- The simplified APIs remain narrow and can be removed or replaced after the course-project demo.
