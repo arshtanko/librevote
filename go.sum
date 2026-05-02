@@ -185,6 +185,10 @@ github.com/libp2p/go-libp2p-kad-dht v0.27.0 h1:1Ea32tVTPiAfaLpPMbaBWFJgbsi/JpMqC
 github.com/libp2p/go-libp2p-kad-dht v0.27.0/go.mod h1:ixhjLuzaXSGtWsKsXTj7erySNuVC4UP7NO015cRrF14=
 github.com/libp2p/go-libp2p-kbucket v0.6.4 h1:OjfiYxU42TKQSB8t8WYd8MKhYhMJeO2If+NiuKfb6iQ=
 github.com/libp2p/go-libp2p-kbucket v0.6.4/go.mod h1:jp6w82sczYaBsAypt5ayACcRJi0lgsba7o4TzJKEfWA=
+github.com/libp2p/go-libp2p-pubsub v0.10.0 h1:wS0S5FlISavMaAbxyQn3dxMOe2eegMfswM471RuHJwA=
+github.com/libp2p/go-libp2p-pubsub v0.10.0/go.mod h1:1OxbaT/pFRO5h+Dpze8hdHQ63R0ke55XTs6b6NwLLkw=
+github.com/libp2p/go-libp2p-pubsub v0.11.0 h1:+JvS8Kty0OiyUiN0i8H5JbaCgjnJTRnTHe4rU88dLFc=
+github.com/libp2p/go-libp2p-pubsub v0.11.0/go.mod h1:QEb+hEV9WL9wCiUAnpY29FZR6W3zK8qYlaml8R4q6gQ=
 github.com/libp2p/go-libp2p-record v0.2.0 h1:oiNUOCWno2BFuxt3my4i1frNrt7PerzB3queqa1NkQ0=
 github.com/libp2p/go-libp2p-record v0.2.0/go.mod h1:I+3zMkvvg5m2OcSdoL0KPljyJyvNDFGKX7QdlpYUcwk=
 github.com/libp2p/go-libp2p-routing-helpers v0.7.4 h1:6LqS1Bzn5CfDJ4tzvP9uwh42IB7TJLNFJA6dEeGBv84=
