@@ -88,6 +88,12 @@ func (s *Service) ListServableObjectRefs(ctx context.Context, scope string, scop
 	return s.store.ListServableObjectRefs(ctx, scope, scopeID, objectTypes)
 }
 
+// ListServableScopes returns distinct (scope, scope_id) pairs for all locally
+// retained objects with servable validation statuses.
+func (s *Service) ListServableScopes(ctx context.Context) ([]storage.ScopePair, error) {
+	return s.store.ListServableScopes(ctx)
+}
+
 // LoadObjectEnvelope reconstructs a full domain object envelope for a retained
 // and servable object. It delegates to the storage layer.
 func (s *Service) LoadObjectEnvelope(ctx context.Context, objectID string) (domain.ObjectEnvelope, error) {
@@ -492,6 +498,22 @@ func (s *Service) LoadAnonymousElection(ctx context.Context, electionID string) 
 		return domain.AnonymousElectionPayload{}, fmt.Errorf("anonymous election %s not found", electionID)
 	}
 	return inputs.Election, nil
+}
+
+func (s *Service) RevalidateDependents(ctx context.Context, objectID string) error {
+	deps, err := s.store.ObjectsWaitingOnDependency(ctx, storage.Dependency{Type: "object_id", ID: objectID})
+	if err != nil {
+		return fmt.Errorf("find dependents of %s: %w", objectID, err)
+	}
+	for _, depID := range deps {
+		if depID == objectID {
+			continue
+		}
+		if _, err := s.runner.RevalidateObjectID(ctx, depID); err != nil {
+			return fmt.Errorf("revalidate dependent %s: %w", depID, err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) FinalTrusteeSet(ctx context.Context, electionID string) ([]domain.TrusteeCandidate, error) {

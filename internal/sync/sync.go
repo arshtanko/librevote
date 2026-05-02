@@ -49,8 +49,9 @@ func (r Result) Error() error {
 	return fmt.Errorf("%d sync errors: %s", len(r.Errors), strings.Join(r.Errors, "; "))
 }
 
-// dependencyRank returns a low-to-high rank for ingestion order.
-var dependencyRank = map[string]int{
+// DependencyRank returns a low-to-high rank for ingestion order and
+// announcement publishing order.
+var DependencyRank = map[string]int{
 	string(domain.ObjectTypeTrusteeSelectionElection): 0,
 	string(domain.ObjectTypeAnonymousElection):        0,
 	string(domain.ObjectTypeTrusteeNomination):        1,
@@ -64,6 +65,19 @@ var dependencyRank = map[string]int{
 	string(domain.ObjectTypeAnonymousBallot):          6,
 	string(domain.ObjectTypeTallyDecryptionShare):     7,
 	string(domain.ObjectTypeTallyResult):              8,
+}
+
+// SortByDependencyRank sorts refs in ascending dependency order.
+// Within the same rank, refs are ordered by ObjectID.
+func SortByDependencyRank(refs []ObjectRef) {
+	sort.Slice(refs, func(i, j int) bool {
+		ri := DependencyRank[refs[i].ObjectType]
+		rj := DependencyRank[refs[j].ObjectType]
+		if ri != rj {
+			return ri < rj
+		}
+		return refs[i].ObjectID < refs[j].ObjectID
+	})
 }
 
 func verifyEnvelopeMatchesRef(envelope domain.ObjectEnvelope, ref ObjectRef, scope string, scopeID string) error {
@@ -135,14 +149,7 @@ func Sync(ctx context.Context, transport Transport, store StoreQuerier, ingester
 		missingRefs = append(missingRefs, info.ref)
 	}
 
-	sort.Slice(missingRefs, func(i, j int) bool {
-		ri := dependencyRank[missingRefs[i].ObjectType]
-		rj := dependencyRank[missingRefs[j].ObjectType]
-		if ri != rj {
-			return ri < rj
-		}
-		return missingRefs[i].ObjectID < missingRefs[j].ObjectID
-	})
+	SortByDependencyRank(missingRefs)
 
 	for _, ref := range missingRefs {
 		info := remoteRefs[ref.ObjectID]

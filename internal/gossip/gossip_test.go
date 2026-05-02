@@ -855,6 +855,181 @@ func TestGossipAnnouncementIntegration(t *testing.T) {
 	}
 }
 
+func TestPublishTimestampAllowsRetryAfterEmptyMesh(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	h1 := newTestHost(t, ctx)
+	defer h1.Close()
+	h2 := newTestHost(t, ctx)
+	defer h2.Close()
+
+	var mu sync.Mutex
+	var received []gossip.ObjectAnnouncement
+	callback := func(a gossip.ObjectAnnouncement, sourcePeerID string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		received = append(received, a)
+		t.Logf("received: %s ts=%d from=%s", a.ObjectID, a.PublishTimestamp, sourcePeerID)
+		return nil
+	}
+
+	svc1, err := gossip.NewService(ctx, h1, "testnet", nil)
+	if err != nil {
+		t.Fatalf("NewService h1: %v", err)
+	}
+	defer svc1.Close()
+
+	svc2, err := gossip.NewService(ctx, h2, "testnet", callback)
+	if err != nil {
+		t.Fatalf("NewService h2: %v", err)
+	}
+	defer svc2.Close()
+
+	time.Sleep(time.Second)
+
+	// Publish T0 before h2 connects to h1 (empty mesh from h2's perspective).
+	// This records the message ID in h1's GossipSub seen cache but h2 never gets it.
+	a0 := gossip.ObjectAnnouncement{
+		ObjectID:         "obj-retry-ts",
+		ObjectType:       "AnonymousBallot",
+		Scope:            "election_id",
+		ScopeID:          "el-1",
+		CreatedAt:        9500,
+		PublishTimestamp: 100,
+	}
+	if err := svc1.Publish(ctx, a0); err != nil {
+		t.Fatalf("Publish T0: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// Connect h2 to h1 after the first publish.
+	h1Addr := h1.Addrs()[0].String() + "/p2p/" + h1.ID().String()
+	addrInfo, err := peer.AddrInfoFromString(h1Addr)
+	if err != nil {
+		t.Fatalf("parse addr: %v", err)
+	}
+	if err := h2.Connect(ctx, *addrInfo); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	time.Sleep(2 * time.Second)
+
+	// Publish T1 with a different timestamp. This produces a different
+	// GossipSub message ID and should reach h2 despite T0 being "seen" by h1.
+	a1 := gossip.ObjectAnnouncement{
+		ObjectID:         "obj-retry-ts",
+		ObjectType:       "AnonymousBallot",
+		Scope:            "election_id",
+		ScopeID:          "el-1",
+		CreatedAt:        9500,
+		PublishTimestamp: 200,
+	}
+	if err := svc1.Publish(ctx, a1); err != nil {
+		t.Fatalf("Publish T1: %v", err)
+	}
+
+	waitFor(t, 10*time.Second, func() bool {
+		mu.Lock()
+		got := len(received)
+		mu.Unlock()
+		return got > 0
+	})
+
+	mu.Lock()
+	count := len(received)
+	mu.Unlock()
+	if count == 0 {
+		t.Fatal("h2 should receive the T1 announcement despite T0 being 'seen' by GossipSub")
+	}
+	t.Logf("received %d announcements (expected 1, the T1 re-publish)", count)
+}
+
+func TestPublishTimestampRepeatedPubWithoutConnect(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	h1 := newTestHost(t, ctx)
+	defer h1.Close()
+	h2 := newTestHost(t, ctx)
+	defer h2.Close()
+
+	var mu sync.Mutex
+	callCount := 0
+	callback := func(a gossip.ObjectAnnouncement, sourcePeerID string) error {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+		return nil
+	}
+
+	svc1, err := gossip.NewService(ctx, h1, "testnet", nil)
+	if err != nil {
+		t.Fatalf("NewService h1: %v", err)
+	}
+	defer svc1.Close()
+
+	svc2, err := gossip.NewService(ctx, h2, "testnet", callback)
+	if err != nil {
+		t.Fatalf("NewService h2: %v", err)
+	}
+	defer svc2.Close()
+
+	time.Sleep(time.Second)
+
+	// Publish 3 times with different timestamps BEFORE connecting.
+	// GossipSub may suppress across publishes if message ID is only data-hash.
+	// With PublishTimestamp, each has a unique JSON → unique message ID.
+	for i, ts := range []int64{100, 200, 300} {
+		a := gossip.ObjectAnnouncement{
+			ObjectID:         "obj-multi-ts",
+			ObjectType:       "AnonymousBallot",
+			Scope:            "election_id",
+			ScopeID:          "el-1",
+			CreatedAt:        9500,
+			PublishTimestamp: ts,
+		}
+		if err := svc1.Publish(ctx, a); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	// Now connect — h2's GossipSub may have received some via gossip flood
+	// or they were suppressed because h1 had no mesh peers.
+	h2Addr := h2.Addrs()[0].String() + "/p2p/" + h2.ID().String()
+	addrInfo, _ := peer.AddrInfoFromString(h2Addr)
+	h1.Connect(ctx, *addrInfo)
+	time.Sleep(time.Second)
+
+	// Publish once more with a new timestamp — this must reach h2.
+	a4 := gossip.ObjectAnnouncement{
+		ObjectID:         "obj-multi-ts",
+		ObjectType:       "AnonymousBallot",
+		Scope:            "election_id",
+		ScopeID:          "el-1",
+		CreatedAt:        9500,
+		PublishTimestamp: 400,
+	}
+	if err := svc1.Publish(ctx, a4); err != nil {
+		t.Fatalf("Publish T4: %v", err)
+	}
+
+	waitFor(t, 10*time.Second, func() bool {
+		mu.Lock()
+		c := callCount
+		mu.Unlock()
+		return c > 0
+	})
+
+	mu.Lock()
+	c := callCount
+	mu.Unlock()
+	if c == 0 {
+		t.Fatal("h2 should receive the post-connect publish with new PublishTimestamp")
+	}
+	t.Logf("callback count: %d (expect >= 1)", c)
+}
+
 func TestAnnouncementContainsNoPayload(t *testing.T) {
 	a := gossip.ObjectAnnouncement{
 		ObjectID:   "obj-1",

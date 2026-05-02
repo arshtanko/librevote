@@ -231,7 +231,7 @@ func (d *Discovery) DiscoverPeers(ctx context.Context) ([]PeerInfo, error) {
 		for _, a := range info.Addrs {
 			pi.Addrs = append(pi.Addrs, a.String())
 		}
-		pi.HTTPURL = d.lookupHTTPURL(ctx, pid)
+		pi.HTTPURL = d.PeerHTTPURL(ctx, pid)
 		result = append(result, pi)
 	}
 
@@ -240,6 +240,11 @@ func (d *Discovery) DiscoverPeers(ctx context.Context) ([]PeerInfo, error) {
 	})
 
 	return result, announceErr
+}
+
+// PeerHTTPURL queries a peer for its HTTP sync URL via a libp2p stream.
+func (d *Discovery) PeerHTTPURL(ctx context.Context, pid peer.ID) string {
+	return d.lookupHTTPURL(ctx, pid)
 }
 
 // handleHTTPAdvertise responds to HTTP URL queries from peers.

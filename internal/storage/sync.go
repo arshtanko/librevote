@@ -137,6 +137,48 @@ func (s *Store) LoadObjectEnvelope(ctx context.Context, objectID string) (domain
 	}, nil
 }
 
+// ScopePair is a distinct scope + scope_id from servable objects.
+type ScopePair struct {
+	Scope   string
+	ScopeID string
+}
+
+// ListServableScopes returns distinct (scope, scope_id) pairs for all locally
+// retained objects with servable validation statuses.
+func (s *Store) ListServableScopes(ctx context.Context) ([]ScopePair, error) {
+	servableStatuses := []string{
+		string(domain.ValidationStatusValid),
+		string(domain.ValidationStatusValidForTally),
+		string(domain.ValidationStatusValidButConflicted),
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT o.scope, o.scope_id
+		 FROM objects o
+		 JOIN validation_records vr ON vr.object_id = o.object_id
+		 WHERE o.payload_retained = 1
+		 AND vr.validation_status IN (?, ?, ?)
+		 ORDER BY o.scope, o.scope_id`,
+		servableStatuses[0], servableStatuses[1], servableStatuses[2])
+	if err != nil {
+		return nil, fmt.Errorf("list servable scopes: %w", err)
+	}
+	defer rows.Close()
+
+	var pairs []ScopePair
+	for rows.Next() {
+		var p ScopePair
+		if err := rows.Scan(&p.Scope, &p.ScopeID); err != nil {
+			return nil, fmt.Errorf("scan scope pair: %w", err)
+		}
+		pairs = append(pairs, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate scope pairs: %w", err)
+	}
+	return pairs, nil
+}
+
 func validateListServableParams(scope string, scopeID string) error {
 	if scope == "" {
 		return errors.New("scope is required")

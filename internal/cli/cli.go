@@ -31,6 +31,7 @@ Commands:
   librevote node sync --db <path> --peer <url> [--scope <scope>] [--scope-id <id>] [--network <id>]
   librevote node serve --db <path> --listen <addr> [--network <id>]
   librevote node discover --db <path> [--bootstrap <multiaddrs>] [--listen <multiaddrs>] [--key <path>] [--network <id>] [--rendezvous <prefix>] [--mode <auto|server|client>] [--http-advertise <url>]
+  librevote node start --db <path> --listen-http <addr> [--listen-p2p <multiaddr>] [--key <path>] [--bootstrap <multiaddrs>] [--http-advertise <url>] [--network <id>] [--rendezvous <prefix>] [--mode <auto|server|client>] [--announce-interval <duration>]
 `
 
 // Run executes the CLI surface for the MVP trustee-selection stage.

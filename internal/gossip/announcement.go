@@ -14,11 +14,12 @@ const MaxAnnouncementBytes = 4096
 
 // ObjectAnnouncement is a compact GossipSub object advertisement.
 type ObjectAnnouncement struct {
-	ObjectID   string `json:"object_id"`
-	ObjectType string `json:"object_type"`
-	Scope      string `json:"scope"`
-	ScopeID    string `json:"scope_id"`
-	CreatedAt  int64  `json:"created_at"`
+	ObjectID         string `json:"object_id"`
+	ObjectType       string `json:"object_type"`
+	Scope            string `json:"scope"`
+	ScopeID          string `json:"scope_id"`
+	CreatedAt        int64  `json:"created_at"`
+	PublishTimestamp int64  `json:"publish_timestamp"`
 }
 
 // EncodeAnnouncement marshals an ObjectAnnouncement to JSON with a size limit.

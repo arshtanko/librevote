@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# LibreVote MVP demo script.
-# Creates a full voting workflow on Node A, serves it via HTTP,
-# and syncs it to a fresh Node B using P2P peer sync.
+# LibreVote MVP demo script — Stage 9 Networking Integration.
+# Creates a full voting workflow on Node A, starts both nodes with
+# libp2p/Kademlia discovery + GossipSub announcements to demonstrate
+# the full P2P object sync path.
 #
 # Usage:
 #   ./scripts/demo-mvp.sh                         # build + run
@@ -23,13 +24,19 @@ done
 
 TMPDIR="$(mktemp -d -t librevote-demo.XXXXXX)"
 
+# Track PIDs for cleanup
+NODE_A_PID=""
+NODE_B_PID=""
+
 cleanup() {
-  if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    echo
-    echo "[demo] stopping node A server (pid $SERVER_PID)..."
-    kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
-  fi
+  echo
+  for pid in "$NODE_B_PID" "$NODE_A_PID"; do
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "[demo] stopping process pid $pid ..."
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
   if $KEEP; then
     echo "[demo] kept data dir: $TMPDIR"
   else
@@ -44,6 +51,7 @@ if [[ -z "$BIN" ]]; then
   PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
   BIN="${TMPDIR}/librevote"
   go build -o "$BIN" "$PROJECT_DIR/cmd/librevote"
+  echo "[demo] built: $BIN"
 fi
 
 if [[ ! -x "$BIN" ]]; then
@@ -51,25 +59,28 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
-# Find a free port on 127.0.0.1.
-PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()" 2>/dev/null) || true
-if [[ -z "$PORT" ]]; then
+# Find a free port for HTTP.
+find_free_port() {
   for p in $(seq 20000 20100); do
     if ! ss -tln 2>/dev/null | grep -q "127.0.0.1:$p "; then
-      PORT=$p
-      break
+      echo "$p"
+      return
     fi
   done
-fi
-if [[ -z "$PORT" ]]; then
-  echo "error: could not find free port" >&2
+  python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()" 2>/dev/null || true
+}
+
+HTTP_PORT_A=$(find_free_port)
+if [[ -z "$HTTP_PORT_A" ]]; then
+  echo "error: could not find free HTTP port for Node A" >&2
   exit 1
 fi
+
+# HTTP_PORT_B is allocated after Node A binds, so ports are guaranteed distinct.
 
 DB_A="${TMPDIR}/demo_a.sqlite"
 DB_B="${TMPDIR}/demo_b.sqlite"
 NET="demo-net"
-PEER_URL="http://127.0.0.1:${PORT}"
 
 # run prints the command, executes it, and fails on non-zero exit.
 run() {
@@ -81,12 +92,12 @@ run() {
   "$BIN" "$@"
 }
 
-echo "=== LibreVote MVP Demo ==="
+echo "=== LibreVote MVP Demo (Stage 9: P2P with Discovery + GossipSub) ==="
 echo "demo dir: $TMPDIR"
 echo "node A db: $DB_A"
 echo "node B db: $DB_B"
 echo "network:  $NET"
-echo "port:     $PORT"
+echo "node A HTTP port: $HTTP_PORT_A"
 
 # ---- Node A: Create full workflow ----
 
@@ -125,50 +136,202 @@ echo "========== TALLY RESULT (Node A, local compute) =========="
 run "tally show A"         tally show                   --db "$DB_A" --network "$NET" --election an-demo
 echo "=========================================================="
 
-# ---- Start Node A HTTP server ----
+# ---- Stage 9: P2P Integration Demo ----
 
 echo
-echo "--- starting node A server on ${PEER_URL} ---"
-"$BIN" node serve --db "$DB_A" --listen "127.0.0.1:${PORT}" &
-SERVER_PID=$!
-echo "[demo] node A server pid: $SERVER_PID"
+echo "============ STAGE 9: P2P Discovery + GossipSub ============"
 
-# Wait until the server is accepting connections.
-for i in $(seq 1 20); do
-  if curl -sf "${PEER_URL}/inventory?scope=network" >/dev/null 2>&1; then
-    echo "[demo] node A server ready (attempt $i)"
+# Start Node A as an integrated node (HTTP + libp2p + GossipSub).
+# Node A runs in server mode to act as a bootstrap peer.
+NODE_A_KEY="${TMPDIR}/node_a.key"
+
+echo
+echo "--- starting integrated Node A ---"
+echo "\$ librevote node start --db $DB_A --listen-http 127.0.0.1:${HTTP_PORT_A} \\"
+echo "    --listen-p2p /ip4/127.0.0.1/tcp/0 --key $NODE_A_KEY \\"
+echo "    --http-advertise http://127.0.0.1:${HTTP_PORT_A} --mode server \\"
+echo "    --announce-interval 3s"
+"$BIN" node start \
+    --db "$DB_A" \
+    --listen-http "127.0.0.1:${HTTP_PORT_A}" \
+    --listen-p2p "/ip4/127.0.0.1/tcp/0" \
+    --key "$NODE_A_KEY" \
+    --http-advertise "http://127.0.0.1:${HTTP_PORT_A}" \
+    --mode server \
+    --announce-interval 3s \
+    > "${TMPDIR}/node_a.out" 2>&1 &
+NODE_A_PID=$!
+echo "[demo] Node A pid: $NODE_A_PID"
+
+# Wait for Node A to be ready (HTTP server + libp2p).
+NODE_A_READY=false
+for i in $(seq 1 30); do
+  if curl -sf "http://127.0.0.1:${HTTP_PORT_A}/inventory?scope=network" >/dev/null 2>&1; then
+    echo "[demo] Node A HTTP ready (attempt $i)"
+    NODE_A_READY=true
     break
   fi
-  sleep 0.25
+  sleep 0.5
 done
+if ! $NODE_A_READY; then
+  echo "error: Node A did not become ready on port $HTTP_PORT_A" >&2
+  echo "Node A output (last 20 lines):"
+  tail -20 "${TMPDIR}/node_a.out" 2>/dev/null || true
+  exit 1
+fi
 
-# ---- Node B: Init, sync from Node A, and show tally ----
+# Extract Node A's peer ID and actual listen multiaddr from startup output.
+PEER_ID_A=""
+LISTEN_ADDR_A=""
+if [[ -f "${TMPDIR}/node_a.out" ]]; then
+  PEER_ID_A=$(grep -oP 'peer_id:\s*\K\S+' "${TMPDIR}/node_a.out" | head -1 || true)
+  LISTEN_ADDR_A=$(grep -oP 'libp2p listen:\s*\K\S+' "${TMPDIR}/node_a.out" | head -1 || true)
+fi
+if [[ -z "$PEER_ID_A" ]]; then
+  echo "[demo] warning: could not parse Node A peer_id from output"
+fi
+if [[ -z "$LISTEN_ADDR_A" ]]; then
+  echo "[demo] warning: could not parse Node A listen address from output"
+  echo "[demo] Node A output (first 20 lines):"
+  head -20 "${TMPDIR}/node_a.out" 2>/dev/null || true
+fi
+echo "[demo] Node A peer_id: $PEER_ID_A"
+echo "[demo] Node A listen multiaddr: $LISTEN_ADDR_A"
 
+echo
+echo "--- starting integrated Node B ---"
+
+# Allocate Node B port after Node A is bound, guaranteeing distinct ports.
+HTTP_PORT_B=$(find_free_port)
+if [[ -z "$HTTP_PORT_B" ]]; then
+  echo "error: could not find free HTTP port for Node B" >&2
+  exit 1
+fi
+echo "[demo] node B HTTP port: $HTTP_PORT_B"
+
+# Init Node B first.
 run "init B"               init                         --db "$DB_B" --network "$NET"
 
+NODE_B_KEY="${TMPDIR}/node_b.key"
+BOOTSTRAP_NODE_B=""
+if [[ -n "$LISTEN_ADDR_A" ]]; then
+  BOOTSTRAP_NODE_B="$LISTEN_ADDR_A"
+elif [[ -n "$PEER_ID_A" ]]; then
+  echo "[demo] warning: no listen addr, falling back to constructed bootstrap"
+  BOOTSTRAP_NODE_B="/ip4/127.0.0.1/tcp/0/p2p/${PEER_ID_A}"
+fi
+
+# Node B bootstraps from Node A's libp2p address if available,
+# otherwise falls back to discovery-only mode.
+NODE_B_ARGS=(
+    --db "$DB_B"
+    --listen-http "127.0.0.1:${HTTP_PORT_B}"
+    --listen-p2p "/ip4/127.0.0.1/tcp/0"
+    --key "$NODE_B_KEY"
+    --http-advertise "http://127.0.0.1:${HTTP_PORT_B}"
+    --mode client
+    --announce-interval 10s
+)
+if [[ -n "$BOOTSTRAP_NODE_B" ]]; then
+  NODE_B_ARGS+=(--bootstrap "$BOOTSTRAP_NODE_B")
+fi
+
+echo "\$ librevote node start ${NODE_B_ARGS[*]}"
+"$BIN" node start "${NODE_B_ARGS[@]}" \
+    > "${TMPDIR}/node_b.out" 2>&1 &
+NODE_B_PID=$!
+echo "[demo] Node B pid: $NODE_B_PID"
+
+# Wait for Node B HTTP server.
+NODE_B_READY=false
+for i in $(seq 1 30); do
+  if curl -sf "http://127.0.0.1:${HTTP_PORT_B}/inventory?scope=network" >/dev/null 2>&1; then
+    echo "[demo] Node B HTTP ready (attempt $i)"
+    NODE_B_READY=true
+    break
+  fi
+  sleep 0.5
+done
+if ! $NODE_B_READY; then
+  echo "error: Node B did not become ready on port $HTTP_PORT_B" >&2
+  echo "Node B output (last 20 lines):"
+  tail -20 "${TMPDIR}/node_b.out" 2>/dev/null || true
+  exit 1
+fi
+
 echo
-echo "============ P2P SYNC: Node B pulls objects from Node A ============"
+echo "--- waiting for gossip sync between nodes ---"
+# Wait for Node B to receive objects via GossipSub-triggered direct fetch.
+# Node A announces its objects every 3 seconds with a unique publish timestamp
+# so each cycle produces distinct GossipSub message IDs that bypass protocol-level
+# duplicate suppression. Node B fetches full envelopes via HTTP and ingests them.
+#
+# Stage 9 success requires a servable TallyResult in election scope on Node B.
+# Object count alone is insufficient; we explicitly check object_type.
+SYNCED=false
+TALLY_RESULT_OBJ_ID=""
+for i in $(seq 1 40); do
+  refs_json=$(curl -sf "http://127.0.0.1:${HTTP_PORT_B}/inventory?scope=election_id&scope_id=an-demo" 2>/dev/null || true)
+  if [[ -n "$refs_json" ]]; then
+    TALLY_RESULT_OBJ_ID=$(echo "$refs_json" | python3 -c "
+import sys, json
+refs = json.load(sys.stdin)
+for r in refs:
+    if r.get('object_type') == 'TallyResult':
+        print(r['object_id'])
+        break
+" 2>/dev/null || true)
+  fi
+  if [[ -n "$TALLY_RESULT_OBJ_ID" ]]; then
+    echo "[demo] Node B has servable TallyResult after $((i * 3)) seconds (id=$TALLY_RESULT_OBJ_ID)"
+    SYNCED=true
+    break
+  fi
+  if [[ $((i % 4)) -eq 0 ]]; then
+    echo "[demo] waiting for TallyResult (${i}/40, +$((i * 3))s)... Node B election inventory:"
+    if [[ -n "$refs_json" ]]; then
+      echo "$refs_json" | python3 -m json.tool 2>/dev/null | grep -E 'object_type|TallyResult' | head -10 || echo "  (no TallyResult yet)"
+    fi
+  fi
+  sleep 3
+done
 
-# First pass: objects with cross-scope dependencies will land as pending_dependencies.
-run "sync network scope"   node sync                    --db "$DB_B" --peer "$PEER_URL" --scope network
-
-run "sync trustee scope"   node sync                    --db "$DB_B" --peer "$PEER_URL" --scope trustee_selection_id --scope-id ts-demo
-
-run "sync election scope"  node sync                    --db "$DB_B" --peer "$PEER_URL" --scope election_id --scope-id an-demo
-
-echo "--- second pass: revalidate pending cross-scope dependencies ---"
-
-# Second pass: pending objects are not servable and will be re-fetched.
-# Their dependencies are now available from the first pass.
-run "sync network (2)"     node sync                    --db "$DB_B" --peer "$PEER_URL" --scope network
-
-run "sync election (2)"    node sync                    --db "$DB_B" --peer "$PEER_URL" --scope election_id --scope-id an-demo
-
-echo "====================================================================="
+if ! $SYNCED; then
+  echo
+  echo "[demo] ================================================================"
+  echo "[demo] *** FAILURE: GossipSub sync did not deliver TallyResult.     ***"
+  echo "[demo] *** The P2P gossip path is required for this demo.           ***"
+  echo "[demo] *** Static sync fallback is disabled to avoid masking bugs.  ***"
+  echo "[demo] ================================================================" >&2
+  exit 1
+fi
 
 echo
-echo "========== TALLY RESULT (Node B, via P2P sync) =========="
-run "tally show B"         tally show                   --db "$DB_B" --network "$NET" --election an-demo
+echo "===================================================================="
+echo "[demo] SUCCESS: Node B synced via Kademlia/GossipSub/direct fetch."
+echo "[demo] No static sync fallback was required."
+echo "===================================================================="
+
+# Stop Node B to run tally show against its DB (no storage lock conflict).
+echo
+echo "--- stopping Node B for local tally verification ---"
+if [[ -n "$NODE_B_PID" ]] && kill -0 "$NODE_B_PID" 2>/dev/null; then
+  kill "$NODE_B_PID" 2>/dev/null || true
+  wait "$NODE_B_PID" 2>/dev/null || true
+  NODE_B_PID=""
+fi
+echo "[demo] Node B stopped. Running tally show on its local DB."
+
+echo
+echo "========== TALLY RESULT (Node B, local DB after P2P sync) =========="
+"$BIN" tally show --db "$DB_B" --network "$NET" --election an-demo
+echo "===================================================================="
+
+echo
+echo "--- Node B P2P log (last 10 announcement-related lines) ---"
+if [[ -f "${TMPDIR}/node_b.out" ]]; then
+  grep -i "gossip\|discovery\|announce" "${TMPDIR}/node_b.out" 2>/dev/null | tail -10 || echo "  (no P2P log lines found)"
+fi
 echo "=========================================================="
 
 echo
