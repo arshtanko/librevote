@@ -229,8 +229,8 @@ Step 5. Build the election screen:
 
 Step 6. Build the voting screen:
 
-- Do not bind voters to nodes.
-- Let the user select or enter a voter identity from the local election allowlist when available.
+- Bind the voter identity to the local node for the course frontend, configured when `frontend serve` starts.
+- Do not let the browser select or enter an arbitrary voter identity.
 - Let the user select a choice from the local election options.
 - Cast votes through the node service and show clear errors when the election is not synced or the voter is not eligible.
 

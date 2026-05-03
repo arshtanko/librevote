@@ -72,6 +72,7 @@ const indexHTML = `<!doctype html>
           <div><dt>Options</dt><dd><div id="election-options" class="list"></div></dd></div>
           <div><dt>Eligible voters</dt><dd><div id="election-voters" class="list"></div></dd></div>
           <div><dt>Local signable voters</dt><dd><div id="signable-voters" class="list"></div></dd></div>
+          <div><dt>This node voter</dt><dd id="local-voter">loading...</dd></div>
           <div><dt>Tally key set</dt><dd id="tally-key-set">loading...</dd></div>
           <div><dt>Ballots seen</dt><dd id="ballots-seen">loading...</dd></div>
           <div><dt>Valid ballots</dt><dd id="valid-ballots">loading...</dd></div>
@@ -84,10 +85,6 @@ const indexHTML = `<!doctype html>
         <h2>Vote</h2>
         <p id="vote-waiting" class="muted">Waiting for a local election and tally key set.</p>
         <div id="vote-form" hidden>
-          <label>Voter
-            <input id="voter-id" list="voter-list" placeholder="voter-1" autocomplete="off">
-            <datalist id="voter-list"></datalist>
-          </label>
           <label>Choice
             <select id="vote-choice"></select>
           </label>
@@ -142,6 +139,7 @@ const indexHTML = `<!doctype html>
       renderList('election-options', status.options || []);
       renderList('election-voters', status.eligible_voter_ids || status.voter_ids || []);
       renderList('signable-voters', status.voter_ids || []);
+      $('local-voter').textContent = status.local_voter_id ? ('This node voter: ' + status.local_voter_id) : 'This node is not configured as a voter';
       $('tally-key-set').textContent = status.tally_key_set_available ? 'available' : 'not available';
       $('ballots-seen').textContent = String(status.ballots_seen || 0);
       $('valid-ballots').textContent = String(status.valid_ballot_count || 0);
@@ -151,29 +149,30 @@ const indexHTML = `<!doctype html>
     }
 
     function renderVoteForm(status) {
-      const voters = status.voter_ids || [];
       const ready = Boolean(status.available && status.tally_key_set_available);
-      const signable = voters.length > 0;
-      $('vote-waiting').hidden = ready && signable;
-      $('vote-form').hidden = !ready;
-      $('cast-vote').disabled = !signable;
-      $('voter-id').disabled = !signable;
-      $('vote-choice').disabled = !signable;
+      const configured = Boolean(status.local_voter_id);
+      const signable = Boolean(status.local_voter_signable);
+      const voted = Boolean(status.local_voter_voted);
+      $('vote-waiting').hidden = ready && configured && signable && !voted;
+      $('vote-form').hidden = !ready || !configured || !signable || voted;
+      $('cast-vote').disabled = !configured || !signable || voted;
+      $('vote-choice').disabled = !configured || !signable || voted;
       if (!ready) {
         $('vote-waiting').textContent = status.available ? 'Waiting for a valid TallyKeySet before voting.' : 'Waiting for a local election before voting.';
         return;
       }
+      if (!configured) {
+        $('vote-waiting').textContent = 'This node is not configured as a voter.';
+        return;
+      }
       if (!signable) {
-        $('vote-waiting').textContent = status.message || 'Election is available, but this node has no local signing keys for eligible voters.';
+        $('vote-waiting').textContent = 'This node voter is not eligible/signable for the local election: ' + status.local_voter_id;
+        return;
       }
-      const voterList = $('voter-list');
-      voterList.innerHTML = '';
-      for (const voter of voters) {
-        const option = document.createElement('option');
-        option.value = voter;
-        voterList.appendChild(option);
+      if (voted) {
+        $('vote-waiting').textContent = 'This node voter has already voted: ' + status.local_voter_id;
+        return;
       }
-      if (!$('voter-id').value && voters.length > 0) $('voter-id').value = voters[0];
 
       const choices = status.options || [];
       const choiceSelect = $('vote-choice');
@@ -251,7 +250,7 @@ const indexHTML = `<!doctype html>
         const res = await fetch('/api/vote/cast', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ voter_id: $('voter-id').value, choice: $('vote-choice').value })
+          body: JSON.stringify({ choice: $('vote-choice').value })
         });
         const body = await res.json();
         if (!res.ok) throw new Error(body.error || ('vote failed with status ' + res.status));

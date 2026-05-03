@@ -31,13 +31,27 @@ type ElectionController interface {
 	CastFrontendVote(ctx context.Context, voterID, choice string) (app.FrontendVoteResult, error)
 }
 
+type localVoterElectionController interface {
+	ElectionStatusForLocalVoter(ctx context.Context, voterID string) (app.ElectionStatus, error)
+}
+
+type Config struct {
+	LocalVoterID string
+}
+
 type Server struct {
 	controller         Controller
 	electionController ElectionController
+	config             Config
 }
 
 func NewServer(controller Controller, electionController ...ElectionController) *Server {
-	server := &Server{controller: controller}
+	return NewServerWithConfig(controller, Config{}, electionController...)
+}
+
+func NewServerWithConfig(controller Controller, config Config, electionController ...ElectionController) *Server {
+	config.LocalVoterID = strings.TrimSpace(config.LocalVoterID)
+	server := &Server{controller: controller, config: config}
 	if len(electionController) > 0 {
 		server.electionController = electionController[0]
 	}
@@ -64,6 +78,7 @@ type statusResponse struct {
 	BootstrapPeers         []string `json:"bootstrap_peers"`
 	BootstrapPeerCount     int      `json:"bootstrap_peer_count"`
 	BootstrapPeerCountNote string   `json:"bootstrap_peer_count_note"`
+	LocalVoterID           string   `json:"local_voter_id,omitempty"`
 }
 
 type connectRequest struct {
@@ -206,6 +221,9 @@ func (s *Server) handleElectionStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
 		return
 	}
+	if localStatus, localErr := s.electionStatus(r.Context()); localErr == nil {
+		status = localStatus
+	}
 	writeJSON(w, http.StatusOK, status)
 }
 
@@ -218,6 +236,10 @@ func (s *Server) handleVoteCast(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "election service is not available"})
 		return
 	}
+	if s.config.LocalVoterID == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "local voter is not configured"})
+		return
+	}
 	defer r.Body.Close()
 
 	var req voteCastRequest
@@ -225,7 +247,12 @@ func (s *Server) handleVoteCast(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON body"})
 		return
 	}
-	result, err := s.electionController.CastFrontendVote(r.Context(), req.VoterID, req.Choice)
+	req.VoterID = strings.TrimSpace(req.VoterID)
+	if req.VoterID != "" && req.VoterID != s.config.LocalVoterID {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "voter_id does not match local voter binding"})
+		return
+	}
+	result, err := s.electionController.CastFrontendVote(r.Context(), s.config.LocalVoterID, req.Choice)
 	if err != nil {
 		writeJSON(w, voteErrorStatus(err), errorResponse{Error: err.Error()})
 		return
@@ -255,14 +282,20 @@ func (s *Server) status() statusResponse {
 		BootstrapPeers:         bootstrap,
 		BootstrapPeerCount:     len(bootstrap),
 		BootstrapPeerCountNote: "configured bootstrap addresses only; discovered peers are reflected in connected_peer_count",
+		LocalVoterID:           s.config.LocalVoterID,
 	}
 }
 
 func (s *Server) electionStatus(ctx context.Context) (app.ElectionStatus, error) {
 	if s.electionController == nil {
-		return app.ElectionStatus{Message: "election service is not available"}, nil
+		return app.ElectionStatus{LocalVoterID: s.config.LocalVoterID, Message: "election service is not available"}, nil
 	}
-	return s.electionController.ElectionStatus(ctx)
+	if controller, ok := s.electionController.(localVoterElectionController); ok {
+		return controller.ElectionStatusForLocalVoter(ctx, s.config.LocalVoterID)
+	}
+	status, err := s.electionController.ElectionStatus(ctx)
+	status.LocalVoterID = s.config.LocalVoterID
+	return status, err
 }
 
 func parseBootstrapInput(req connectRequest) ([]string, []entryError) {

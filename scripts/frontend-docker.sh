@@ -31,6 +31,12 @@ done
 for i in $(seq 1 "$COUNT"); do
   http_port=$((18080 + i - 1))
   p2p_port=$((19000 + i - 1))
+  voter_args=()
+  voter_label="observer"
+  if [[ "$i" -le 3 ]]; then
+    voter_label="voter-$i"
+    voter_args=(--voter-id "$voter_label")
+  fi
   docker run -d \
     --name "$NAME_PREFIX-$i" \
     --network "$NETWORK" \
@@ -45,6 +51,7 @@ for i in $(seq 1 "$COUNT"); do
       --http-advertise "http://$NAME_PREFIX-$i:8080" \
       --mode server \
       --announce-interval 30s \
+      "${voter_args[@]}" \
     >/dev/null
 done
 
@@ -61,7 +68,11 @@ for i in $(seq 1 "$COUNT"); do
     fi
     sleep 0.25
   done
-  echo "node $i frontend: $url"
+  voter_label="observer"
+  if [[ "$i" -le 3 ]]; then
+    voter_label="voter-$i"
+  fi
+  echo "node $i frontend ($voter_label): $url"
   if [[ -n "$peer_id" ]]; then
     echo "node $i bootstrap multiaddr: /ip4/127.0.0.1/tcp/${p2p_port}/p2p/${peer_id}"
   else

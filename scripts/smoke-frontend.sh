@@ -40,6 +40,7 @@ OUT="$TMPDIR/frontend.out"
   --listen-p2p /ip4/127.0.0.1/tcp/0 \
   --mode server \
   --announce-interval 30s \
+  --voter-id voter-1 \
   > "$OUT" 2>&1 &
 PID="$!"
 
@@ -55,6 +56,8 @@ STATUS="$(curl -fsS "http://127.0.0.1:$PORT/api/network/status")"
 ELECTION_BEFORE="$(curl -fsS "http://127.0.0.1:$PORT/api/election/status")"
 ELECTION_START="$(curl -fsS -X POST "http://127.0.0.1:$PORT/api/election/start")"
 ELECTION_AFTER="$(curl -fsS "http://127.0.0.1:$PORT/api/election/status")"
+VOTE_CAST="$(curl -fsS -X POST -H 'Content-Type: application/json' -d '{"choice":"yes"}' "http://127.0.0.1:$PORT/api/vote/cast")"
+ELECTION_VOTED="$(curl -fsS "http://127.0.0.1:$PORT/api/election/status")"
 
 if [[ "$INDEX" != *"LibreVote Node"* ]]; then
   echo "error: frontend index does not contain LibreVote Node" >&2
@@ -87,13 +90,15 @@ if status['node_name'] != 'LibreVote Node':
     raise SystemExit('unexpected node_name: ' + status['node_name'])
 PY
 
-python3 - "$ELECTION_BEFORE" "$ELECTION_START" "$ELECTION_AFTER" <<'PY'
+python3 - "$ELECTION_BEFORE" "$ELECTION_START" "$ELECTION_AFTER" "$VOTE_CAST" "$ELECTION_VOTED" <<'PY'
 import json
 import sys
 
 before = json.loads(sys.argv[1])
 started = json.loads(sys.argv[2])
 after = json.loads(sys.argv[3])
+vote = json.loads(sys.argv[4])
+voted = json.loads(sys.argv[5])
 if before.get('available'):
     raise SystemExit('election unexpectedly available before start')
 if not before.get('message'):
@@ -105,8 +110,14 @@ for name, status in [('start', started), ('after', after)]:
         raise SystemExit(f'missing election fields in {name} response: {status}')
     if not status.get('tally_key_set_available'):
         raise SystemExit(f'tally key set unavailable in {name} response')
+    if status.get('local_voter_id') != 'voter-1' or not status.get('local_voter_signable'):
+        raise SystemExit(f'missing local voter fields in {name} response: {status}')
 if started.get('election_id') != after.get('election_id'):
     raise SystemExit('election id changed after start')
+if vote.get('voter_id') != 'voter-1' or vote.get('choice') != 'yes' or not vote.get('object_id'):
+    raise SystemExit(f'unexpected vote response: {vote}')
+if not voted.get('local_voter_voted'):
+    raise SystemExit(f'local voter voted state not reported: {voted}')
 PY
 
 echo "frontend smoke passed: http://127.0.0.1:$PORT/"

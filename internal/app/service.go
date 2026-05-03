@@ -39,6 +39,9 @@ type ElectionStatus struct {
 	Options              []string `json:"options,omitempty"`
 	VoterIDs             []string `json:"voter_ids,omitempty"`
 	EligibleVoterIDs     []string `json:"eligible_voter_ids,omitempty"`
+	LocalVoterID         string   `json:"local_voter_id,omitempty"`
+	LocalVoterSignable   bool     `json:"local_voter_signable"`
+	LocalVoterVoted      bool     `json:"local_voter_voted"`
 	TallyKeySetAvailable bool     `json:"tally_key_set_available"`
 	BallotsSeen          int      `json:"ballots_seen"`
 	ValidBallotCount     int      `json:"valid_ballot_count"`
@@ -203,6 +206,38 @@ func (s *Service) ElectionStatus(ctx context.Context) (ElectionStatus, error) {
 		ValidBallotCount:     validBallots,
 		Message:              message,
 	}, nil
+}
+
+func (s *Service) ElectionStatusForLocalVoter(ctx context.Context, voterID string) (ElectionStatus, error) {
+	voterID = strings.TrimSpace(voterID)
+	status, err := s.ElectionStatus(ctx)
+	if err != nil {
+		return ElectionStatus{}, err
+	}
+	status.LocalVoterID = voterID
+	if voterID == "" || !status.Available {
+		return status, nil
+	}
+	for _, signable := range status.VoterIDs {
+		if signable == voterID {
+			status.LocalVoterSignable = true
+			break
+		}
+	}
+	if !status.TallyKeySetAvailable {
+		return status, nil
+	}
+	inputs, err := s.store.TallyComputationInputs(ctx, status.ElectionID)
+	if err != nil {
+		return ElectionStatus{}, fmt.Errorf("local voter status inputs: %w", err)
+	}
+	for _, ballot := range inputs.RetainedBallots {
+		if ballot.Status == validation.StatusValidForTally && ballot.Payload.VoterID == voterID {
+			status.LocalVoterVoted = true
+			break
+		}
+	}
+	return status, nil
 }
 
 func (s *Service) StartMVPElection(ctx context.Context) (ElectionStatus, error) {

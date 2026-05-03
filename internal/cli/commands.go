@@ -1339,6 +1339,10 @@ func cmdFrontendServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 2
 	}
+	localVoterID := strings.TrimSpace(flags["voter-id"])
+	if localVoterID == "" {
+		localVoterID = strings.TrimSpace(os.Getenv("LIBREVOTE_FRONTEND_VOTER_ID"))
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1352,7 +1356,7 @@ func cmdFrontendServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: create frontend node: %v\n", err)
 		return 1
 	}
-	ns.SetExtraHTTPHandler(frontend.NewServer(ns, ns.Service()).Handler())
+	ns.SetExtraHTTPHandler(frontend.NewServerWithConfig(ns, frontend.Config{LocalVoterID: localVoterID}, ns.Service()).Handler())
 
 	if err := ns.Start(ctx); err != nil {
 		ns.Stop()
@@ -1373,6 +1377,11 @@ func cmdFrontendServe(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "  network: %s\n", config.NetworkID)
 	fmt.Fprintf(stdout, "  announce_interval: %s\n", announceInterval)
+	if localVoterID != "" {
+		fmt.Fprintf(stdout, "  local_voter_id: %s\n", localVoterID)
+	} else {
+		fmt.Fprintf(stdout, "  local_voter_id: not configured\n")
+	}
 
 	if runErr := ns.Run(); runErr != nil {
 		fmt.Fprintf(stderr, "error: frontend run: %v\n", runErr)
@@ -1497,7 +1506,7 @@ var nodeDiscoverKnownFlags = flagSet("db", "bootstrap", "listen", "key", "networ
 
 var nodeStartKnownFlags = flagSet("db", "listen-http", "listen-p2p", "key", "bootstrap", "http-advertise", "network", "rendezvous", "mode", "announce-interval")
 
-var frontendServeKnownFlags = flagSet("db", "listen-http", "listen-p2p", "key", "bootstrap", "http-advertise", "network", "rendezvous", "mode", "announce-interval")
+var frontendServeKnownFlags = flagSet("db", "listen-http", "listen-p2p", "key", "bootstrap", "http-advertise", "network", "rendezvous", "mode", "announce-interval", "voter-id")
 
 func flagSet(names ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(names))
