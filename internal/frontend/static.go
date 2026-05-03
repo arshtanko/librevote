@@ -45,7 +45,6 @@ const indexHTML = `<!doctype html>
   <main>
     <header>
       <div>
-        <div class="tag">Equal peer node</div>
         <h1>LibreVote Node</h1>
       </div>
       <button id="refresh">Refresh</button>
@@ -58,8 +57,6 @@ const indexHTML = `<!doctype html>
           <div><dt>Peer ID</dt><dd id="peer-id">loading...</dd></div>
           <div><dt>Connected peers</dt><dd id="connected">loading...</dd></div>
           <div><dt>Active peer IDs</dt><dd><div id="active-peers" class="list"></div></dd></div>
-          <div><dt>Listen multiaddrs</dt><dd><div id="listen" class="list"></div></dd></div>
-          <div><dt>Configured bootstrap addresses</dt><dd><div id="bootstrap" class="list"></div></dd></div>
         </dl>
       </section>
 
@@ -143,8 +140,6 @@ no</textarea></label>
       $('peer-id').textContent = networkStatus.peer_id || 'not available yet';
       $('connected').textContent = (networkStatus.connected_peer_count || 0) + ' connected';
       renderList('active-peers', networkStatus.connected_peer_ids || []);
-      renderList('listen', networkStatus.listen_multiaddrs || []);
-      renderList('bootstrap', networkStatus.bootstrap_peers || []);
       renderPeerPicker(networkStatus.connected_peer_ids || []);
       await refreshElectionStatus();
     }
@@ -159,6 +154,10 @@ no</textarea></label>
 
     function renderPeerPicker(peers) {
       const el = $('peer-picker');
+      const checked = new Set();
+      for (const cb of el.querySelectorAll('input[type=checkbox]')) {
+        if (cb.checked) checked.add(cb.value);
+      }
       el.innerHTML = '';
       if (!peers.length) {
         const empty = document.createElement('div');
@@ -174,6 +173,7 @@ no</textarea></label>
         input.type = 'checkbox';
         input.value = peer;
         input.id = 'peer-' + peer;
+        input.checked = checked.has(peer);
         label.append(input, document.createTextNode(peer));
         el.appendChild(label);
       }
@@ -421,6 +421,7 @@ no</textarea></label>
     };
 
     refreshStatus();
+    setInterval(() => refreshStatus(), 3000);
   </script>
 </body>
 </html>`

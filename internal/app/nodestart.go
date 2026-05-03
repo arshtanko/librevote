@@ -23,6 +23,7 @@ import (
 )
 
 const defaultAnnounceInterval = 10 * time.Second
+const defaultSyncInterval = 5 * time.Second
 
 // NodeStartConfig holds configuration for the integrated node.
 type NodeStartConfig struct {
@@ -36,6 +37,7 @@ type NodeStartConfig struct {
 	Mode             string
 	AdvertisedHTTP   string
 	AnnounceInterval time.Duration
+	SyncInterval     time.Duration
 	ExtraHTTPHandler nethttp.Handler
 }
 
@@ -82,6 +84,9 @@ func NewNodeStart(ctx context.Context, config NodeStartConfig, logf func(string,
 	if config.AnnounceInterval <= 0 {
 		config.AnnounceInterval = defaultAnnounceInterval
 	}
+	if config.SyncInterval <= 0 {
+		config.SyncInterval = defaultSyncInterval
+	}
 	if logf == nil {
 		logf = func(string, ...interface{}) {}
 	}
@@ -103,6 +108,10 @@ func NewNodeStart(ctx context.Context, config NodeStartConfig, logf func(string,
 		logf:      logf,
 		extraHTTP: config.ExtraHTTPHandler,
 	}
+
+	svc.SetPublishFunc(func(ctx context.Context) error {
+		return ns.publishInventory()
+	})
 
 	return ns, nil
 }
@@ -183,6 +192,10 @@ func (ns *NodeStart) Start(ctx context.Context) error {
 	// 5. Start periodic announcement publishing
 	ns.wg.Add(1)
 	go ns.announceLoop()
+
+	// 6. Start periodic catch-up sync
+	ns.wg.Add(1)
+	go ns.syncLoop()
 
 	return nil
 }
@@ -588,4 +601,70 @@ func (ns *NodeStart) publishInventory() error {
 
 	ns.logf("announce: published %d objects across %d scopes (ts=%d)", totalPublished, len(scopes), cycleTimestamp)
 	return nil
+}
+
+func (ns *NodeStart) doSync() {
+	if ns.svc == nil {
+		return
+	}
+	ns.mu.Lock()
+	peerURLs := make([]string, 0, len(ns.peerHTTP))
+	for _, u := range ns.peerHTTP {
+		if u != "" {
+			peerURLs = append(peerURLs, u)
+		}
+	}
+	ns.mu.Unlock()
+	if len(peerURLs) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ns.ctx, 30*time.Second)
+	defer cancel()
+
+	scopes, err := ns.svc.ListServableScopes(ctx)
+	if err != nil {
+		ns.logf("sync: list scopes: %v", err)
+		return
+	}
+	if len(scopes) == 0 {
+		scopes = append(scopes, storage.ScopePair{Scope: string(domain.ScopeNetwork)})
+	}
+
+	var totalFetched int
+	for _, sp := range scopes {
+		result, err := librevotesync.Sync(ctx, ns.transport, ns.svc, ns.svc, sp.Scope, sp.ScopeID, nil, peerURLs)
+		if err != nil {
+			ns.logf("sync: scope=%s scope_id=%s: %v", sp.Scope, sp.ScopeID, err)
+			continue
+		}
+		totalFetched += result.Fetched
+		if len(result.Errors) > 0 {
+			ns.logf("sync: scope=%s errors: %s", sp.Scope, strings.Join(result.Errors, "; "))
+		}
+	}
+	if totalFetched > 0 {
+		ns.logf("sync: fetched %d objects", totalFetched)
+	}
+}
+
+func (ns *NodeStart) syncLoop() {
+	defer ns.wg.Done()
+
+	// Delay initial sync so discovery has time to find peers.
+	time.Sleep(5 * time.Second)
+
+	ns.doSync()
+
+	ticker := time.NewTicker(ns.config.SyncInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ns.ctx.Done():
+			return
+		case <-ticker.C:
+			ns.doSync()
+		}
+	}
 }

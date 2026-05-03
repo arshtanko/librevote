@@ -28,9 +28,10 @@ const (
 )
 
 type Service struct {
-	store     *storage.Store
-	runner    *validation.Runner
-	networkID string
+	store       *storage.Store
+	runner      *validation.Runner
+	networkID   string
+	publishFunc func(context.Context) error
 }
 
 type CreateElectionInviteInput struct {
@@ -1520,7 +1521,14 @@ func (s *Service) ingestLocal(ctx context.Context, envelope domain.ObjectEnvelop
 		}
 		return domain.ObjectEnvelope{}, fmt.Errorf("locally created %s has status %s, expected %s: %s", envelope.ObjectType, result.Outcome.Status, expected, reason)
 	}
+	if s.publishFunc != nil {
+		_ = s.publishFunc(ctx)
+	}
 	return envelope, nil
+}
+
+func (s *Service) SetPublishFunc(fn func(context.Context) error) {
+	s.publishFunc = fn
 }
 
 func (s *Service) buildEnvelope(objectType domain.ObjectType, scope domain.Scope, scopeID string, payload []byte, createdAt int64) (domain.ObjectEnvelope, error) {

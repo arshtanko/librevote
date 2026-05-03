@@ -1260,6 +1260,20 @@ func cmdNodeStart(args []string, stdout, stderr io.Writer) int {
 		announceInterval = d
 	}
 
+	syncInterval := 5 * time.Second
+	if raw := flags["sync-interval"]; raw != "" {
+		d, durErr := time.ParseDuration(raw)
+		if durErr != nil {
+			fmt.Fprintf(stderr, "error: invalid --sync-interval %q: %v\n", raw, durErr)
+			return 2
+		}
+		if d <= 0 {
+			fmt.Fprintf(stderr, "error: --sync-interval must be positive\n")
+			return 2
+		}
+		syncInterval = d
+	}
+
 	config := app.NodeStartConfig{
 		DataDir:          dataDir,
 		NetworkID:        networkID,
@@ -1271,6 +1285,7 @@ func cmdNodeStart(args []string, stdout, stderr io.Writer) int {
 		Mode:             mode,
 		AdvertisedHTTP:   advertisedHTTP,
 		AnnounceInterval: announceInterval,
+		SyncInterval:     syncInterval,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1450,6 +1465,18 @@ func nodeStartConfigFromFlags(flags map[string]string) (app.NodeStartConfig, tim
 		announceInterval = d
 	}
 
+	syncInterval := 5 * time.Second
+	if raw := flags["sync-interval"]; raw != "" {
+		d, durErr := time.ParseDuration(raw)
+		if durErr != nil {
+			return app.NodeStartConfig{}, 0, fmt.Errorf("invalid --sync-interval %q: %v", raw, durErr)
+		}
+		if d <= 0 {
+			return app.NodeStartConfig{}, 0, fmt.Errorf("--sync-interval must be positive")
+		}
+		syncInterval = d
+	}
+
 	return app.NodeStartConfig{
 		DataDir:          dataDir,
 		NetworkID:        networkID,
@@ -1461,6 +1488,7 @@ func nodeStartConfigFromFlags(flags map[string]string) (app.NodeStartConfig, tim
 		Mode:             mode,
 		AdvertisedHTTP:   flags["http-advertise"],
 		AnnounceInterval: announceInterval,
+		SyncInterval:     syncInterval,
 	}, announceInterval, nil
 }
 
@@ -1494,9 +1522,9 @@ var nodeServeKnownFlags = flagSet("db", "listen", "network")
 
 var nodeDiscoverKnownFlags = flagSet("db", "bootstrap", "listen", "key", "network", "rendezvous", "mode", "http-advertise")
 
-var nodeStartKnownFlags = flagSet("db", "listen-http", "listen-p2p", "key", "bootstrap", "http-advertise", "network", "rendezvous", "mode", "announce-interval")
+var nodeStartKnownFlags = flagSet("db", "listen-http", "listen-p2p", "key", "bootstrap", "http-advertise", "network", "rendezvous", "mode", "announce-interval", "sync-interval")
 
-var frontendServeKnownFlags = flagSet("db", "listen-http", "listen-p2p", "key", "bootstrap", "http-advertise", "network", "rendezvous", "mode", "announce-interval")
+var frontendServeKnownFlags = flagSet("db", "listen-http", "listen-p2p", "key", "bootstrap", "http-advertise", "network", "rendezvous", "mode", "announce-interval", "sync-interval")
 
 func flagSet(names ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(names))
