@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ type Controller interface {
 	PeerID() string
 	ListenMultiaddrs() []string
 	ConnectedPeerCount() int
+	ConnectedPeerIDs() []string
 	BootstrapPeers() []string
 	ConnectPeer(ctx context.Context, multiaddr string) error
 	RefreshPeers(ctx context.Context) ([]string, error)
@@ -27,7 +29,7 @@ type Controller interface {
 
 type ElectionController interface {
 	ElectionStatus(ctx context.Context) (app.ElectionStatus, error)
-	StartMVPElection(ctx context.Context) (app.ElectionStatus, error)
+	StartMVPElectionForVoters(ctx context.Context, voterIDs []string) (app.ElectionStatus, error)
 	CastFrontendVote(ctx context.Context, voterID, choice string) (app.FrontendVoteResult, error)
 }
 
@@ -35,23 +37,13 @@ type localVoterElectionController interface {
 	ElectionStatusForLocalVoter(ctx context.Context, voterID string) (app.ElectionStatus, error)
 }
 
-type Config struct {
-	LocalVoterID string
-}
-
 type Server struct {
 	controller         Controller
 	electionController ElectionController
-	config             Config
 }
 
 func NewServer(controller Controller, electionController ...ElectionController) *Server {
-	return NewServerWithConfig(controller, Config{}, electionController...)
-}
-
-func NewServerWithConfig(controller Controller, config Config, electionController ...ElectionController) *Server {
-	config.LocalVoterID = strings.TrimSpace(config.LocalVoterID)
-	server := &Server{controller: controller, config: config}
+	server := &Server{controller: controller}
 	if len(electionController) > 0 {
 		server.electionController = electionController[0]
 	}
@@ -78,7 +70,6 @@ type statusResponse struct {
 	BootstrapPeers         []string `json:"bootstrap_peers"`
 	BootstrapPeerCount     int      `json:"bootstrap_peer_count"`
 	BootstrapPeerCountNote string   `json:"bootstrap_peer_count_note"`
-	LocalVoterID           string   `json:"local_voter_id,omitempty"`
 }
 
 type connectRequest struct {
@@ -216,7 +207,7 @@ func (s *Server) handleElectionStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "election service is not available"})
 		return
 	}
-	status, err := s.electionController.StartMVPElection(r.Context())
+	status, err := s.electionController.StartMVPElectionForVoters(r.Context(), s.meshVoterIDs())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
 		return
@@ -236,8 +227,9 @@ func (s *Server) handleVoteCast(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "election service is not available"})
 		return
 	}
-	if s.config.LocalVoterID == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "local voter is not configured"})
+	localVoterID := strings.TrimSpace(s.controller.PeerID())
+	if localVoterID == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "local peer ID is not available"})
 		return
 	}
 	defer r.Body.Close()
@@ -248,11 +240,11 @@ func (s *Server) handleVoteCast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.VoterID = strings.TrimSpace(req.VoterID)
-	if req.VoterID != "" && req.VoterID != s.config.LocalVoterID {
+	if req.VoterID != "" && req.VoterID != localVoterID {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "voter_id does not match local voter binding"})
 		return
 	}
-	result, err := s.electionController.CastFrontendVote(r.Context(), s.config.LocalVoterID, req.Choice)
+	result, err := s.electionController.CastFrontendVote(r.Context(), localVoterID, req.Choice)
 	if err != nil {
 		writeJSON(w, voteErrorStatus(err), errorResponse{Error: err.Error()})
 		return
@@ -282,20 +274,44 @@ func (s *Server) status() statusResponse {
 		BootstrapPeers:         bootstrap,
 		BootstrapPeerCount:     len(bootstrap),
 		BootstrapPeerCountNote: "configured bootstrap addresses only; discovered peers are reflected in connected_peer_count",
-		LocalVoterID:           s.config.LocalVoterID,
 	}
 }
 
 func (s *Server) electionStatus(ctx context.Context) (app.ElectionStatus, error) {
 	if s.electionController == nil {
-		return app.ElectionStatus{LocalVoterID: s.config.LocalVoterID, Message: "election service is not available"}, nil
-	}
-	if controller, ok := s.electionController.(localVoterElectionController); ok {
-		return controller.ElectionStatusForLocalVoter(ctx, s.config.LocalVoterID)
+		return app.ElectionStatus{Message: "election service is not available"}, nil
 	}
 	status, err := s.electionController.ElectionStatus(ctx)
-	status.LocalVoterID = s.config.LocalVoterID
+	if err != nil || !status.Available {
+		return status, err
+	}
+	localVoterID := strings.TrimSpace(s.controller.PeerID())
+	if localVoterID == "" {
+		return status, nil
+	}
+	if controller, ok := s.electionController.(localVoterElectionController); ok {
+		return controller.ElectionStatusForLocalVoter(ctx, localVoterID)
+	}
+	status.LocalVoterID = localVoterID
 	return status, err
+}
+
+func (s *Server) meshVoterIDs() []string {
+	seen := make(map[string]struct{})
+	var voterIDs []string
+	for _, id := range append([]string{s.controller.PeerID()}, s.controller.ConnectedPeerIDs()...) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		voterIDs = append(voterIDs, id)
+	}
+	sort.Strings(voterIDs)
+	return voterIDs
 }
 
 func parseBootstrapInput(req connectRequest) ([]string, []entryError) {

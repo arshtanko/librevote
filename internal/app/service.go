@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -240,7 +241,7 @@ func (s *Service) ElectionStatusForLocalVoter(ctx context.Context, voterID strin
 	return status, nil
 }
 
-func (s *Service) StartMVPElection(ctx context.Context) (ElectionStatus, error) {
+func (s *Service) StartMVPElectionForVoters(ctx context.Context, voterIDs []string) (ElectionStatus, error) {
 	status, err := s.ElectionStatus(ctx)
 	if err != nil {
 		return ElectionStatus{}, err
@@ -252,7 +253,11 @@ func (s *Service) StartMVPElection(ctx context.Context) (ElectionStatus, error) 
 		return status, nil
 	}
 
-	if err := s.createDeterministicMVPElectionObjects(ctx); err != nil {
+	voterIDs = normalizeVoterIDs(voterIDs)
+	if len(voterIDs) == 0 {
+		return ElectionStatus{}, fmt.Errorf("start election: at least one voter peer ID is required")
+	}
+	if err := s.createDeterministicMVPElectionObjects(ctx, voterIDs); err != nil {
 		return ElectionStatus{}, err
 	}
 	return s.ElectionStatus(ctx)
@@ -797,16 +802,15 @@ func (s *Service) FinalTrusteeSet(ctx context.Context, electionID string) ([]dom
 	return finalSet, nil
 }
 
-func (s *Service) createDeterministicMVPElectionObjects(ctx context.Context) error {
+func (s *Service) createDeterministicMVPElectionObjects(ctx context.Context, voterIDs []string) error {
 	const (
 		selectionID = "mvp-trustee-selection"
 		electionID  = "mvp-election"
 	)
-	voterNames := []string{"voter-1", "voter-2", "voter-3"}
 	candidateNames := []string{"trustee-1", "trustee-2", "trustee-3"}
 
-	voters := make([]domain.VoterEntry, len(voterNames))
-	for i, name := range voterNames {
+	voters := make([]domain.VoterEntry, len(voterIDs))
+	for i, name := range voterIDs {
 		voters[i] = domain.VoterEntry{
 			VoterID:                  name,
 			VoterSigningPublicKey:    deterministicEd25519Pub(name),
@@ -853,10 +857,10 @@ func (s *Service) createDeterministicMVPElectionObjects(ctx context.Context) err
 		}
 	}
 
-	voterPriv := deterministicEd25519Priv("voter-1")
+	voterPriv := deterministicEd25519Priv(voterIDs[0])
 	votePayload := domain.TrusteeVotePayload{
 		TrusteeSelectionID:    selectionID,
-		VoterPublicKey:        deterministicEd25519Pub("voter-1"),
+		VoterPublicKey:        deterministicEd25519Pub(voterIDs[0]),
 		SelectedCandidateKeys: selectedCandidateKeys,
 	}
 	if _, err := s.CreateTrusteeVote(ctx, votePayload, voterPriv, 3500); err != nil {
@@ -927,6 +931,24 @@ func (s *Service) createDeterministicMVPElectionObjects(ctx context.Context) err
 		return fmt.Errorf("start election tally key set: %w", err)
 	}
 	return nil
+}
+
+func normalizeVoterIDs(voterIDs []string) []string {
+	seen := make(map[string]struct{}, len(voterIDs))
+	normalized := make([]string, 0, len(voterIDs))
+	for _, id := range voterIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	sort.Strings(normalized)
+	return normalized
 }
 
 func deterministicEd25519Priv(name string) ed25519.PrivateKey {

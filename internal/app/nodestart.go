@@ -7,6 +7,7 @@ import (
 	nethttp "net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -295,6 +296,20 @@ func (ns *NodeStart) ConnectedPeerCount() int {
 		return 0
 	}
 	return len(ns.discovery.Host().Network().Peers())
+}
+
+// ConnectedPeerIDs returns active libp2p peer IDs currently connected to this node.
+func (ns *NodeStart) ConnectedPeerIDs() []string {
+	if ns.discovery == nil {
+		return nil
+	}
+	peers := ns.discovery.Host().Network().Peers()
+	ids := make([]string, 0, len(peers))
+	for _, p := range peers {
+		ids = append(ids, p.String())
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // BootstrapPeers returns configured bootstrap multiaddrs.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"reflect"
 	"testing"
 
 	"librevote/internal/app"
@@ -119,7 +118,7 @@ func TestTrusteeSelectionHappyPath(t *testing.T) {
 	}
 }
 
-func TestElectionStatusListsDeterministicMVPSignableVoters(t *testing.T) {
+func TestStartMVPElectionForVotersCreatesExplicitEligibleVoters(t *testing.T) {
 	ctx := context.Background()
 	svc, err := app.Open(t.TempDir(), "testnet")
 	if err != nil {
@@ -127,17 +126,37 @@ func TestElectionStatusListsDeterministicMVPSignableVoters(t *testing.T) {
 	}
 	defer svc.Close()
 
-	status, err := svc.StartMVPElection(ctx)
+	status, err := svc.StartMVPElectionForVoters(ctx, []string{"peer-b", "peer-a", "peer-b"})
 	if err != nil {
-		t.Fatalf("StartMVPElection() error = %v", err)
+		t.Fatalf("StartMVPElectionForVoters() error = %v", err)
 	}
 
-	want := []string{"voter-1", "voter-2", "voter-3"}
-	if !reflect.DeepEqual(status.VoterIDs, want) {
+	want := []string{"peer-a", "peer-b"}
+	if !stringSlicesEqual(status.VoterIDs, want) {
 		t.Fatalf("signable voter_ids = %v, want %v", status.VoterIDs, want)
 	}
-	if !reflect.DeepEqual(status.EligibleVoterIDs, want) {
+	if !stringSlicesEqual(status.EligibleVoterIDs, want) {
 		t.Fatalf("eligible_voter_ids = %v, want %v", status.EligibleVoterIDs, want)
+	}
+}
+
+func TestElectionStatusForLocalVoterUsesPeerVoterID(t *testing.T) {
+	ctx := context.Background()
+	svc, err := app.Open(t.TempDir(), "testnet")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer svc.Close()
+	if _, err := svc.StartMVPElectionForVoters(ctx, []string{"peer-local", "peer-other"}); err != nil {
+		t.Fatalf("StartMVPElectionForVoters() error = %v", err)
+	}
+
+	status, err := svc.ElectionStatusForLocalVoter(ctx, "peer-local")
+	if err != nil {
+		t.Fatalf("ElectionStatusForLocalVoter() error = %v", err)
+	}
+	if status.LocalVoterID != "peer-local" || !status.LocalVoterSignable || status.LocalVoterVoted {
+		t.Fatalf("local voter status = %+v", status)
 	}
 }
 
@@ -199,6 +218,18 @@ func assertStatus(t *testing.T, ctx context.Context, svc *app.Service, objectID 
 	if status != want {
 		t.Fatalf("ValidationStatus(%s) = %s, want %s", objectID, status, want)
 	}
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestActivationHappyPath(t *testing.T) {

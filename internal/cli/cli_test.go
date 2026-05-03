@@ -195,13 +195,10 @@ func TestFrontendServeParsing(t *testing.T) {
 	}
 }
 
-func TestFrontendServeAcceptsVoterIDFlag(t *testing.T) {
-	flags, err := parseFlags([]string{"--db", t.TempDir(), "--network", "testnet", "--voter-id", "voter-1"}, frontendServeKnownFlags)
-	if err != nil {
-		t.Fatalf("parseFlags() error = %v", err)
-	}
-	if flags["voter-id"] != "voter-1" {
-		t.Fatalf("voter-id = %q, want voter-1", flags["voter-id"])
+func TestFrontendServeRejectsVoterIDFlag(t *testing.T) {
+	_, err := parseFlags([]string{"--db", t.TempDir(), "--network", "testnet", "--voter-id", "voter-1"}, frontendServeKnownFlags)
+	if err == nil || err.Error() != "unknown flag --voter-id" {
+		t.Fatalf("parseFlags() error = %v, want unknown flag --voter-id", err)
 	}
 }
 

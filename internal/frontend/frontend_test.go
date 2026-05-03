@@ -23,6 +23,7 @@ type fakeController struct {
 	listen       []string
 	bootstrap    []string
 	connected    int
+	connectedIDs []string
 	connectErr   map[string]error
 	connectCalls []string
 	refreshCalls int
@@ -31,6 +32,7 @@ type fakeController struct {
 func (f *fakeController) PeerID() string             { return f.peerID }
 func (f *fakeController) ListenMultiaddrs() []string { return f.listen }
 func (f *fakeController) ConnectedPeerCount() int    { return f.connected }
+func (f *fakeController) ConnectedPeerIDs() []string { return append([]string(nil), f.connectedIDs...) }
 func (f *fakeController) BootstrapPeers() []string   { return f.bootstrap }
 func (f *fakeController) ConnectPeer(ctx context.Context, multiaddr string) error {
 	f.connectCalls = append(f.connectCalls, multiaddr)
@@ -52,7 +54,7 @@ func TestStatus(t *testing.T) {
 		bootstrap: []string{"/ip4/127.0.0.1/tcp/2/p2p/peer-2"},
 		connected: 3,
 	}
-	ts := httptest.NewServer(NewServerWithConfig(fc, Config{LocalVoterID: "voter-2"}).Handler())
+	ts := httptest.NewServer(NewServer(fc).Handler())
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/api/network/status")
@@ -73,9 +75,6 @@ func TestStatus(t *testing.T) {
 	}
 	if body.BootstrapPeerCount != 1 || body.ConnectedPeerLabel == "" {
 		t.Fatalf("missing honest peer fields: %+v", body)
-	}
-	if body.LocalVoterID != "voter-2" {
-		t.Fatalf("local voter id = %q, want voter-2", body.LocalVoterID)
 	}
 }
 
@@ -231,7 +230,7 @@ func TestElectionStatusBeforeStart(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer svc.Close()
-	ts := httptest.NewServer(NewServerWithConfig(&fakeController{}, Config{LocalVoterID: "voter-1"}, svc).Handler())
+	ts := httptest.NewServer(NewServer(&fakeController{peerID: "peer-local"}, svc).Handler())
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/api/election/status")
@@ -249,8 +248,8 @@ func TestElectionStatusBeforeStart(t *testing.T) {
 	if body.Available || body.TallyKeySetAvailable || body.Message == "" {
 		t.Fatalf("unexpected status before start: %+v", body)
 	}
-	if body.LocalVoterID != "voter-1" {
-		t.Fatalf("local voter id = %q, want voter-1", body.LocalVoterID)
+	if body.LocalVoterID != "" {
+		t.Fatalf("local voter id = %q, want empty before election", body.LocalVoterID)
 	}
 }
 
@@ -260,7 +259,8 @@ func TestElectionStartAndStatus(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer svc.Close()
-	ts := httptest.NewServer(NewServerWithConfig(&fakeController{}, Config{LocalVoterID: "voter-1"}, svc).Handler())
+	fc := &fakeController{peerID: "peer-local", connectedIDs: []string{"peer-2", "peer-1", "peer-2"}}
+	ts := httptest.NewServer(NewServer(fc, svc).Handler())
 	defer ts.Close()
 
 	resp, err := http.Post(ts.URL+"/api/election/start", "application/json", nil)
@@ -278,10 +278,11 @@ func TestElectionStartAndStatus(t *testing.T) {
 	if !started.Available || !started.TallyKeySetAvailable || started.ElectionID == "" || len(started.Options) == 0 {
 		t.Fatalf("unexpected started status: %+v", started)
 	}
-	if len(started.VoterIDs) == 0 {
-		t.Fatalf("started status missing voter ids: %+v", started)
+	wantVoters := []string{"peer-1", "peer-2", "peer-local"}
+	if strings.Join(started.EligibleVoterIDs, ",") != strings.Join(wantVoters, ",") {
+		t.Fatalf("eligible voters = %v, want %v", started.EligibleVoterIDs, wantVoters)
 	}
-	if started.LocalVoterID != "voter-1" || !started.LocalVoterSignable || started.LocalVoterVoted {
+	if started.LocalVoterID != "peer-local" || !started.LocalVoterSignable || started.LocalVoterVoted {
 		t.Fatalf("started status missing local voter fields: %+v", started)
 	}
 
@@ -305,7 +306,7 @@ func TestVoteCastUnavailableBeforeStart(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer svc.Close()
-	ts := httptest.NewServer(NewServerWithConfig(&fakeController{}, Config{LocalVoterID: "voter-1"}, svc).Handler())
+	ts := httptest.NewServer(NewServer(&fakeController{peerID: "peer-local"}, svc).Handler())
 	defer ts.Close()
 
 	resp := postVoteCast(t, ts.URL, `{"choice":"yes"}`)
@@ -322,15 +323,17 @@ func TestVoteCastUnavailableBeforeStart(t *testing.T) {
 	}
 }
 
-func TestVoteCastWithoutConfiguredVoterFails(t *testing.T) {
+func TestVoteCastWithoutLocalPeerIDFails(t *testing.T) {
 	svc, err := app.Open(t.TempDir(), "frontend-test")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer svc.Close()
+	if _, err := svc.StartMVPElectionForVoters(context.Background(), []string{"peer-other"}); err != nil {
+		t.Fatalf("StartMVPElectionForVoters() error = %v", err)
+	}
 	ts := httptest.NewServer(NewServer(&fakeController{}, svc).Handler())
 	defer ts.Close()
-	postElectionStart(t, ts.URL)
 
 	resp := postVoteCast(t, ts.URL, `{"choice":"yes"}`)
 	defer resp.Body.Close()
@@ -341,7 +344,7 @@ func TestVoteCastWithoutConfiguredVoterFails(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode error: %v", err)
 	}
-	if body.Error != "local voter is not configured" {
+	if body.Error != "local peer ID is not available" {
 		t.Fatalf("error = %q", body.Error)
 	}
 }
@@ -352,7 +355,7 @@ func TestVoteCastSuccessfulAfterStart(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer svc.Close()
-	ts := httptest.NewServer(NewServerWithConfig(&fakeController{}, Config{LocalVoterID: "voter-1"}, svc).Handler())
+	ts := httptest.NewServer(NewServer(&fakeController{peerID: "peer-local"}, svc).Handler())
 	defer ts.Close()
 	postElectionStart(t, ts.URL)
 
@@ -389,7 +392,7 @@ func TestVoteCastMismatchedVoterAndInvalidChoice(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer svc.Close()
-	ts := httptest.NewServer(NewServerWithConfig(&fakeController{}, Config{LocalVoterID: "voter-1"}, svc).Handler())
+	ts := httptest.NewServer(NewServer(&fakeController{peerID: "peer-local"}, svc).Handler())
 	defer ts.Close()
 	postElectionStart(t, ts.URL)
 
@@ -398,7 +401,7 @@ func TestVoteCastMismatchedVoterAndInvalidChoice(t *testing.T) {
 		body string
 		want string
 	}{
-		{name: "mismatched voter", body: `{"voter_id":"voter-2","choice":"yes"}`, want: "voter_id does not match local voter binding"},
+		{name: "mismatched voter", body: `{"voter_id":"peer-2","choice":"yes"}`, want: "voter_id does not match local voter binding"},
 		{name: "invalid choice", body: `{"choice":"maybe"}`, want: "choice is not valid"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -424,7 +427,7 @@ func TestVoteCastDuplicateIsIdempotent(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer svc.Close()
-	ts := httptest.NewServer(NewServerWithConfig(&fakeController{}, Config{LocalVoterID: "voter-1"}, svc).Handler())
+	ts := httptest.NewServer(NewServer(&fakeController{peerID: "peer-local"}, svc).Handler())
 	defer ts.Close()
 	postElectionStart(t, ts.URL)
 
@@ -467,13 +470,39 @@ func TestElectionStartIsIdempotent(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer svc.Close()
-	ts := httptest.NewServer(NewServer(&fakeController{}, svc).Handler())
+	ts := httptest.NewServer(NewServer(&fakeController{peerID: "peer-local"}, svc).Handler())
 	defer ts.Close()
 
 	first := postElectionStart(t, ts.URL)
 	second := postElectionStart(t, ts.URL)
 	if first.ElectionID != second.ElectionID || first.Title != second.Title || first.BallotsSeen != second.BallotsSeen {
 		t.Fatalf("start not idempotent: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestVoteCastFailsWhenLocalPeerNotInElectionAllowlist(t *testing.T) {
+	svc, err := app.Open(t.TempDir(), "frontend-test")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer svc.Close()
+	if _, err := svc.StartMVPElectionForVoters(context.Background(), []string{"peer-other"}); err != nil {
+		t.Fatalf("StartMVPElectionForVoters() error = %v", err)
+	}
+	ts := httptest.NewServer(NewServer(&fakeController{peerID: "peer-local"}, svc).Handler())
+	defer ts.Close()
+
+	resp := postVoteCast(t, ts.URL, `{"choice":"yes"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	var body errorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if !strings.Contains(body.Error, "voter is not eligible") {
+		t.Fatalf("error = %q", body.Error)
 	}
 }
 

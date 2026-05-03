@@ -229,7 +229,8 @@ Step 5. Build the election screen:
 
 Step 6. Build the voting screen:
 
-- Bind the voter identity to the local node for the course frontend, configured when `frontend serve` starts.
+- When a frontend starts an election, bind the election voter allowlist to the local peer ID plus peer IDs actively connected in the mesh at creation time.
+- Derive the local voter identity from the node peer ID after the election exists.
 - Do not let the browser select or enter an arbitrary voter identity.
 - Let the user select a choice from the local election options.
 - Cast votes through the node service and show clear errors when the election is not synced or the voter is not eligible.

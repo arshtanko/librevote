@@ -70,9 +70,8 @@ const indexHTML = `<!doctype html>
           <div><dt>Title</dt><dd id="election-title">loading...</dd></div>
           <div><dt>Election ID</dt><dd id="election-id">loading...</dd></div>
           <div><dt>Options</dt><dd><div id="election-options" class="list"></div></dd></div>
-          <div><dt>Eligible voters</dt><dd><div id="election-voters" class="list"></div></dd></div>
-          <div><dt>Local signable voters</dt><dd><div id="signable-voters" class="list"></div></dd></div>
-          <div><dt>This node voter</dt><dd id="local-voter">loading...</dd></div>
+          <div><dt>Election voter allowlist</dt><dd><div id="election-voters" class="list"></div></dd></div>
+          <div><dt>This node eligibility</dt><dd id="local-voter">loading...</dd></div>
           <div><dt>Tally key set</dt><dd id="tally-key-set">loading...</dd></div>
           <div><dt>Ballots seen</dt><dd id="ballots-seen">loading...</dd></div>
           <div><dt>Valid ballots</dt><dd id="valid-ballots">loading...</dd></div>
@@ -136,10 +135,15 @@ const indexHTML = `<!doctype html>
       $('election-available').textContent = status.available ? 'available locally' : 'not available locally';
       $('election-title').textContent = status.title || 'not available yet';
       $('election-id').textContent = status.election_id || 'not available yet';
-      renderList('election-options', status.options || []);
-      renderList('election-voters', status.eligible_voter_ids || status.voter_ids || []);
-      renderList('signable-voters', status.voter_ids || []);
-      $('local-voter').textContent = status.local_voter_id ? ('This node voter: ' + status.local_voter_id) : 'This node is not configured as a voter';
+      renderList('election-options', status.available ? (status.options || []) : []);
+      renderList('election-voters', status.available ? (status.eligible_voter_ids || []) : []);
+      if (!status.available) {
+        $('local-voter').textContent = 'Election has not been created yet.';
+      } else if (status.local_voter_id) {
+        $('local-voter').textContent = status.local_voter_signable ? ('This node peer ID is eligible: ' + status.local_voter_id) : ('This node peer ID is not in the election allowlist: ' + status.local_voter_id);
+      } else {
+        $('local-voter').textContent = 'Local peer ID is not available.';
+      }
       $('tally-key-set').textContent = status.tally_key_set_available ? 'available' : 'not available';
       $('ballots-seen').textContent = String(status.ballots_seen || 0);
       $('valid-ballots').textContent = String(status.valid_ballot_count || 0);
@@ -162,15 +166,15 @@ const indexHTML = `<!doctype html>
         return;
       }
       if (!configured) {
-        $('vote-waiting').textContent = 'This node is not configured as a voter.';
+        $('vote-waiting').textContent = 'Local peer ID is not available.';
         return;
       }
       if (!signable) {
-        $('vote-waiting').textContent = 'This node voter is not eligible/signable for the local election: ' + status.local_voter_id;
+        $('vote-waiting').textContent = 'This node peer ID is not eligible for the local election: ' + status.local_voter_id;
         return;
       }
       if (voted) {
-        $('vote-waiting').textContent = 'This node voter has already voted: ' + status.local_voter_id;
+        $('vote-waiting').textContent = 'This node peer ID has already voted: ' + status.local_voter_id;
         return;
       }
 
