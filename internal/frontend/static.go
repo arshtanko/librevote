@@ -24,6 +24,7 @@ const indexHTML = `<!doctype html>
     button:disabled { opacity: .6; cursor: wait; }
     .list { display: grid; gap: 8px; margin-top: 8px; }
     .item { background: #020617; border: 1px solid #1e293b; border-radius: 10px; padding: 9px; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9rem; }
+    .span-2 { grid-column: 1 / -1; }
     .muted { color: #94a3b8; }
     .message { margin-top: 12px; white-space: pre-wrap; }
     .ok { color: #86efac; }
@@ -59,6 +60,20 @@ const indexHTML = `<!doctype html>
         <button id="connect">Connect and refresh</button>
         <div id="message" class="message"></div>
       </section>
+
+      <section class="span-2">
+        <h2>Election</h2>
+        <dl>
+          <div><dt>Availability</dt><dd id="election-available">loading...</dd></div>
+          <div><dt>Title</dt><dd id="election-title">loading...</dd></div>
+          <div><dt>Election ID</dt><dd id="election-id">loading...</dd></div>
+          <div><dt>Options</dt><dd><div id="election-options" class="list"></div></dd></div>
+          <div><dt>Tally key set</dt><dd id="tally-key-set">loading...</dd></div>
+          <div><dt>Ballots seen</dt><dd id="ballots-seen">loading...</dd></div>
+        </dl>
+        <button id="start-election">Start Election</button>
+        <div id="election-message" class="message muted"></div>
+      </section>
     </div>
   </main>
   <script>
@@ -89,6 +104,25 @@ const indexHTML = `<!doctype html>
       $('connected').textContent = (status.connected_peer_count || 0) + ' (' + (status.connected_peer_label || 'connected peers') + ')';
       renderList('listen', status.listen_multiaddrs || []);
       renderList('bootstrap', status.bootstrap_peers || []);
+      await refreshElectionStatus();
+    }
+
+    async function refreshElectionStatus() {
+      const res = await fetch('/api/election/status');
+      const status = await res.json();
+      if (!res.ok) throw new Error(status.error || ('election status failed with ' + res.status));
+      renderElectionStatus(status);
+    }
+
+    function renderElectionStatus(status) {
+      $('election-available').textContent = status.available ? 'available locally' : 'not available locally';
+      $('election-title').textContent = status.title || 'not available yet';
+      $('election-id').textContent = status.election_id || 'not available yet';
+      renderList('election-options', status.options || []);
+      $('tally-key-set').textContent = status.tally_key_set_available ? 'available' : 'not available';
+      $('ballots-seen').textContent = String(status.ballots_seen || 0);
+      $('election-message').textContent = status.message || '';
+      $('election-message').className = 'message ' + (status.available ? 'ok' : 'muted');
     }
 
     function connectionDetails(body) {
@@ -129,8 +163,26 @@ const indexHTML = `<!doctype html>
       }
     }
 
+    async function startElection() {
+      $('start-election').disabled = true;
+      $('election-message').className = 'message';
+      $('election-message').textContent = 'starting election...';
+      try {
+        const res = await fetch('/api/election/start', { method: 'POST' });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error || ('start failed with status ' + res.status));
+        renderElectionStatus(body);
+      } catch (err) {
+        $('election-message').className = 'message bad';
+        $('election-message').textContent = err.message;
+      } finally {
+        $('start-election').disabled = false;
+      }
+    }
+
     $('refresh').addEventListener('click', refreshStatus);
     $('connect').addEventListener('click', connectPeer);
+    $('start-election').addEventListener('click', startElection);
     refreshStatus().catch((err) => { $('peer-id').textContent = err.message; });
   </script>
 </body>

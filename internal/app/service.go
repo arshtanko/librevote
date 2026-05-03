@@ -30,6 +30,16 @@ type Service struct {
 	networkID string
 }
 
+type ElectionStatus struct {
+	Available            bool     `json:"available"`
+	ElectionID           string   `json:"election_id,omitempty"`
+	Title                string   `json:"title,omitempty"`
+	Options              []string `json:"options,omitempty"`
+	TallyKeySetAvailable bool     `json:"tally_key_set_available"`
+	BallotsSeen          int      `json:"ballots_seen"`
+	Message              string   `json:"message,omitempty"`
+}
+
 func Open(dataDir, networkID string) (*Service, error) {
 	ctx := context.Background()
 	store, err := storage.Open(ctx, storage.Config{
@@ -113,6 +123,62 @@ func (s *Service) IngestEnvelope(ctx context.Context, envelope domain.ObjectEnve
 func (s *Service) IngestSyncEnvelope(ctx context.Context, envelope domain.ObjectEnvelope) error {
 	_, err := s.runner.IngestAndValidate(ctx, envelope)
 	return err
+}
+
+func (s *Service) ElectionStatus(ctx context.Context) (ElectionStatus, error) {
+	refs, err := s.ListServableObjectRefs(ctx, string(domain.ScopeNetwork), "", []string{string(domain.ObjectTypeAnonymousElection)})
+	if err != nil {
+		return ElectionStatus{}, fmt.Errorf("election status: %w", err)
+	}
+	if len(refs) == 0 {
+		return ElectionStatus{Message: "waiting for a synced election or local start"}, nil
+	}
+
+	envelope, err := s.LoadObjectEnvelope(ctx, refs[0].ObjectID)
+	if err != nil {
+		return ElectionStatus{}, fmt.Errorf("load election %s: %w", refs[0].ObjectID, err)
+	}
+	decoded, err := domain.DecodePayload(domain.ObjectTypeAnonymousElection, envelope.Payload)
+	if err != nil {
+		return ElectionStatus{}, fmt.Errorf("decode election %s: %w", refs[0].ObjectID, err)
+	}
+	election := decoded.(domain.AnonymousElectionPayload)
+
+	inputs, err := s.GetTallyComputationInputs(ctx, election.ElectionID)
+	if err != nil {
+		return ElectionStatus{}, fmt.Errorf("load election tally inputs: %w", err)
+	}
+	message := ""
+	if !inputs.TallyKeySetFound {
+		message = "waiting for valid TallyKeySet"
+	}
+	return ElectionStatus{
+		Available:            true,
+		ElectionID:           election.ElectionID,
+		Title:                election.Title,
+		Options:              append([]string(nil), election.Options...),
+		TallyKeySetAvailable: inputs.TallyKeySetFound,
+		BallotsSeen:          len(inputs.RetainedBallots),
+		Message:              message,
+	}, nil
+}
+
+func (s *Service) StartMVPElection(ctx context.Context) (ElectionStatus, error) {
+	status, err := s.ElectionStatus(ctx)
+	if err != nil {
+		return ElectionStatus{}, err
+	}
+	if status.Available && status.TallyKeySetAvailable {
+		return status, nil
+	}
+	if status.Available {
+		return status, nil
+	}
+
+	if err := s.createDeterministicMVPElectionObjects(ctx); err != nil {
+		return ElectionStatus{}, err
+	}
+	return s.ElectionStatus(ctx)
 }
 
 // EvictPendingPayload delegates to the storage layer to evict a pending
@@ -535,6 +601,155 @@ func (s *Service) FinalTrusteeSet(ctx context.Context, electionID string) ([]dom
 		return nil, fmt.Errorf("cannot derive final trustee set for election %s", electionID)
 	}
 	return finalSet, nil
+}
+
+func (s *Service) createDeterministicMVPElectionObjects(ctx context.Context) error {
+	const (
+		selectionID = "mvp-trustee-selection"
+		electionID  = "mvp-election"
+	)
+	voterNames := []string{"voter-1", "voter-2", "voter-3"}
+	candidateNames := []string{"trustee-1", "trustee-2", "trustee-3"}
+
+	voters := make([]domain.VoterEntry, len(voterNames))
+	for i, name := range voterNames {
+		voters[i] = domain.VoterEntry{
+			VoterID:                  name,
+			VoterSigningPublicKey:    deterministicEd25519Pub(name),
+			VoterEncryptionPublicKey: deterministicBytes(name+".enc", 32),
+		}
+	}
+
+	creatorPriv := deterministicEd25519Priv("creator")
+	selectionPayload := domain.TrusteeSelectionElectionPayload{
+		TrusteeSelectionID: selectionID,
+		NetworkID:          s.networkID,
+		Title:              "MVP Trustee Selection",
+		Description:        "Deterministic local MVP trustee selection",
+		VoterAllowlist:     voters,
+		NominationStartsAt: 1000,
+		NominationEndsAt:   2000,
+		VotingStartsAt:     3000,
+		VotingEndsAt:       4000,
+		ConsentStartsAt:    5000,
+		ConsentEndsAt:      6000,
+		TrusteeCountN:      domain.TrusteeCountV1,
+		ThresholdT:         domain.ThresholdV1,
+		MaxChoicesPerVote:  domain.MaxChoicesPerVoteV1,
+	}
+	if _, err := s.CreateTrusteeSelectionElection(ctx, selectionPayload, creatorPriv, 500); err != nil {
+		return fmt.Errorf("start election trustee selection: %w", err)
+	}
+
+	candidateKeys := make([]ed25519.PrivateKey, len(candidateNames))
+	selectedCandidateKeys := make([][]byte, len(candidateNames))
+	for i, name := range candidateNames {
+		candidateKeys[i] = deterministicEd25519Priv(name)
+		candidatePub := deterministicEd25519Pub(name)
+		selectedCandidateKeys[i] = candidatePub
+		payload := domain.TrusteeNominationPayload{
+			TrusteeSelectionID:           selectionID,
+			CandidatePublicKey:           candidatePub,
+			CandidateBlindTokenPublicKey: deterministicBytes(name+".blind", 32),
+			CandidateNodePeerID:          "mvp-local-peer",
+			Statement:                    "Deterministic MVP trustee candidate " + name,
+		}
+		if _, err := s.CreateTrusteeNomination(ctx, payload, candidateKeys[i], 1500); err != nil {
+			return fmt.Errorf("start election nomination %s: %w", name, err)
+		}
+	}
+
+	voterPriv := deterministicEd25519Priv("voter-1")
+	votePayload := domain.TrusteeVotePayload{
+		TrusteeSelectionID:    selectionID,
+		VoterPublicKey:        deterministicEd25519Pub("voter-1"),
+		SelectedCandidateKeys: selectedCandidateKeys,
+	}
+	if _, err := s.CreateTrusteeVote(ctx, votePayload, voterPriv, 3500); err != nil {
+		return fmt.Errorf("start election trustee vote: %w", err)
+	}
+
+	reporterPriv := deterministicEd25519Priv("reporter")
+	reporterPub := deterministicEd25519Pub("reporter")
+	resultEnv, err := s.BuildTrusteeSelectionResult(ctx, selectionID, reporterPub, reporterPriv)
+	if err != nil {
+		return fmt.Errorf("start election trustee result: %w", err)
+	}
+	decodedResult, err := domain.DecodePayload(domain.ObjectTypeTrusteeSelectionResult, resultEnv.Payload)
+	if err != nil {
+		return fmt.Errorf("start election decode trustee result: %w", err)
+	}
+	result := decodedResult.(domain.TrusteeSelectionResultPayload)
+
+	electionPayload := domain.AnonymousElectionPayload{
+		ElectionID:                 electionID,
+		NetworkID:                  s.networkID,
+		Title:                      "LibreVote MVP Election",
+		Description:                "Deterministic local MVP election",
+		Options:                    []string{"yes", "no"},
+		VoterAllowlist:             voters,
+		TrusteeSelectionID:         selectionID,
+		TrusteeSelectionResultHash: result.ResultHash,
+		ThresholdT:                 domain.ThresholdV1,
+		TrusteeCountN:              domain.TrusteeCountV1,
+		EligibilityScheme:          domain.EligibilitySchemeBlindTokenV1,
+		IssuanceStartsAt:           7000,
+		IssuanceEndsAt:             8000,
+		VotingStartsAt:             9000,
+		VotingEndsAt:               10000,
+		TallyStartsAt:              11000,
+	}
+	if _, err := s.CreateAnonymousElection(ctx, electionPayload, creatorPriv, 6000); err != nil {
+		return fmt.Errorf("start election anonymous election: %w", err)
+	}
+
+	electionHash := validation.ComputeElectionParametersHash(electionPayload)
+	for i, name := range candidateNames {
+		payload := domain.TrusteeConsentPayload{
+			TrusteeSelectionID:         selectionID,
+			TrusteeSelectionResultHash: result.ResultHash,
+			ElectionID:                 electionID,
+			ElectionParametersHash:     electionHash,
+			TrusteePublicKey:           deterministicEd25519Pub(name),
+			TrusteeTallySetupPublicKey: deterministicBytes(name+".tally-setup", 32),
+			ThresholdT:                 domain.ThresholdV1,
+			TrusteeCountN:              domain.TrusteeCountV1,
+		}
+		if _, err := s.CreateTrusteeConsent(ctx, payload, candidateKeys[i], 5500); err != nil {
+			return fmt.Errorf("start election trustee consent %s: %w", name, err)
+		}
+	}
+
+	finalTrustees, err := s.FinalTrusteeSet(ctx, electionID)
+	if err != nil {
+		return fmt.Errorf("start election final trustees: %w", err)
+	}
+	for i, name := range candidateNames {
+		if _, err := s.CreateTallyKeyContribution(ctx, electionID, deterministicEd25519Pub(name), deterministicBytes(name+".tally-setup", 32), finalTrustees, candidateKeys[i], 8000); err != nil {
+			return fmt.Errorf("start election tally key contribution %s: %w", name, err)
+		}
+	}
+	if _, err := s.BuildTallyKeySet(ctx, electionID, reporterPub, reporterPriv); err != nil {
+		return fmt.Errorf("start election tally key set: %w", err)
+	}
+	return nil
+}
+
+func deterministicEd25519Priv(name string) ed25519.PrivateKey {
+	h := sha256.Sum256([]byte(name))
+	return ed25519.NewKeyFromSeed(h[:])
+}
+
+func deterministicEd25519Pub(name string) ed25519.PublicKey {
+	return deterministicEd25519Priv(name).Public().(ed25519.PublicKey)
+}
+
+func deterministicBytes(seed string, size int) []byte {
+	h := sha256.Sum256([]byte(seed))
+	if size > len(h) {
+		size = len(h)
+	}
+	return h[:size]
 }
 
 func (s *Service) sign(signDomain crypto.Domain, objectType domain.ObjectType, scope domain.Scope, scopeID string, createdAt int64, unsignedPayload []byte, privKey ed25519.PrivateKey) ([]byte, error) {

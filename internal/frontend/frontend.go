@@ -11,6 +11,7 @@ import (
 
 	peer "github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
+	"librevote/internal/app"
 )
 
 // Controller is the narrow node surface needed by the frontend network screen.
@@ -23,12 +24,22 @@ type Controller interface {
 	RefreshPeers(ctx context.Context) ([]string, error)
 }
 
-type Server struct {
-	controller Controller
+type ElectionController interface {
+	ElectionStatus(ctx context.Context) (app.ElectionStatus, error)
+	StartMVPElection(ctx context.Context) (app.ElectionStatus, error)
 }
 
-func NewServer(controller Controller) *Server {
-	return &Server{controller: controller}
+type Server struct {
+	controller         Controller
+	electionController ElectionController
+}
+
+func NewServer(controller Controller, electionController ...ElectionController) *Server {
+	server := &Server{controller: controller}
+	if len(electionController) > 0 {
+		server.electionController = electionController[0]
+	}
+	return server
 }
 
 func (s *Server) Handler() http.Handler {
@@ -36,6 +47,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/network/status", s.handleStatus)
 	mux.HandleFunc("/api/network/connect", s.handleConnect)
+	mux.HandleFunc("/api/election/status", s.handleElectionStatus)
+	mux.HandleFunc("/api/election/start", s.handleElectionStart)
 	return mux
 }
 
@@ -158,6 +171,36 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleElectionStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	status, err := s.electionStatus(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleElectionStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	if s.electionController == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "election service is not available"})
+		return
+	}
+	status, err := s.electionController.StartMVPElection(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
 func (s *Server) status() statusResponse {
 	bootstrap := s.controller.BootstrapPeers()
 	return statusResponse{
@@ -170,6 +213,13 @@ func (s *Server) status() statusResponse {
 		BootstrapPeerCount:     len(bootstrap),
 		BootstrapPeerCountNote: "configured bootstrap addresses only; discovered peers are reflected in connected_peer_count",
 	}
+}
+
+func (s *Server) electionStatus(ctx context.Context) (app.ElectionStatus, error) {
+	if s.electionController == nil {
+		return app.ElectionStatus{Message: "election service is not available"}, nil
+	}
+	return s.electionController.ElectionStatus(ctx)
 }
 
 func parseBootstrapInput(req connectRequest) ([]string, []entryError) {

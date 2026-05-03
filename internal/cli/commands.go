@@ -1352,7 +1352,7 @@ func cmdFrontendServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: create frontend node: %v\n", err)
 		return 1
 	}
-	ns.SetExtraHTTPHandler(frontend.NewServer(ns).Handler())
+	ns.SetExtraHTTPHandler(frontend.NewServer(ns, ns.Service()).Handler())
 
 	if err := ns.Start(ctx); err != nil {
 		ns.Stop()

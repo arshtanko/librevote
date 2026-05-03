@@ -44,7 +44,7 @@ OUT="$TMPDIR/frontend.out"
 PID="$!"
 
 for _ in $(seq 1 60); do
-  if curl -fsS "http://127.0.0.1:$PORT/api/network/status" >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:$PORT/api/network/status" >/dev/null 2>&1 && curl -fsS "http://127.0.0.1:$PORT/api/election/status" >/dev/null 2>&1; then
     break
   fi
   sleep 0.25
@@ -52,6 +52,9 @@ done
 
 INDEX="$(curl -fsS "http://127.0.0.1:$PORT/")"
 STATUS="$(curl -fsS "http://127.0.0.1:$PORT/api/network/status")"
+ELECTION_BEFORE="$(curl -fsS "http://127.0.0.1:$PORT/api/election/status")"
+ELECTION_START="$(curl -fsS -X POST "http://127.0.0.1:$PORT/api/election/start")"
+ELECTION_AFTER="$(curl -fsS "http://127.0.0.1:$PORT/api/election/status")"
 
 if [[ "$INDEX" != *"LibreVote Node"* ]]; then
   echo "error: frontend index does not contain LibreVote Node" >&2
@@ -82,6 +85,28 @@ if missing:
     raise SystemExit('missing status fields: ' + ', '.join(missing))
 if status['node_name'] != 'LibreVote Node':
     raise SystemExit('unexpected node_name: ' + status['node_name'])
+PY
+
+python3 - "$ELECTION_BEFORE" "$ELECTION_START" "$ELECTION_AFTER" <<'PY'
+import json
+import sys
+
+before = json.loads(sys.argv[1])
+started = json.loads(sys.argv[2])
+after = json.loads(sys.argv[3])
+if before.get('available'):
+    raise SystemExit('election unexpectedly available before start')
+if not before.get('message'):
+    raise SystemExit('missing waiting message before start')
+for name, status in [('start', started), ('after', after)]:
+    if not status.get('available'):
+        raise SystemExit(f'election not available in {name} response')
+    if not status.get('election_id') or not status.get('title') or not status.get('options'):
+        raise SystemExit(f'missing election fields in {name} response: {status}')
+    if not status.get('tally_key_set_available'):
+        raise SystemExit(f'tally key set unavailable in {name} response')
+if started.get('election_id') != after.get('election_id'):
+    raise SystemExit('election id changed after start')
 PY
 
 echo "frontend smoke passed: http://127.0.0.1:$PORT/"

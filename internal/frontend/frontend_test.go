@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"librevote/internal/app"
+
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -218,6 +220,104 @@ func TestConnectRejectsMissingOrInvalidEntries(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestElectionStatusBeforeStart(t *testing.T) {
+	svc, err := app.Open(t.TempDir(), "frontend-test")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer svc.Close()
+	ts := httptest.NewServer(NewServer(&fakeController{}, svc).Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/election/status")
+	if err != nil {
+		t.Fatalf("GET election status: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body app.ElectionStatus
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode election status: %v", err)
+	}
+	if body.Available || body.TallyKeySetAvailable || body.Message == "" {
+		t.Fatalf("unexpected status before start: %+v", body)
+	}
+}
+
+func TestElectionStartAndStatus(t *testing.T) {
+	svc, err := app.Open(t.TempDir(), "frontend-test")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer svc.Close()
+	ts := httptest.NewServer(NewServer(&fakeController{}, svc).Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/election/start", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST election start: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var started app.ElectionStatus
+	if err := json.NewDecoder(resp.Body).Decode(&started); err != nil {
+		t.Fatalf("decode start: %v", err)
+	}
+	if !started.Available || !started.TallyKeySetAvailable || started.ElectionID == "" || len(started.Options) == 0 {
+		t.Fatalf("unexpected started status: %+v", started)
+	}
+
+	resp2, err := http.Get(ts.URL + "/api/election/status")
+	if err != nil {
+		t.Fatalf("GET election status: %v", err)
+	}
+	defer resp2.Body.Close()
+	var status app.ElectionStatus
+	if err := json.NewDecoder(resp2.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if status.ElectionID != started.ElectionID || !status.TallyKeySetAvailable {
+		t.Fatalf("status after start = %+v, started %+v", status, started)
+	}
+}
+
+func TestElectionStartIsIdempotent(t *testing.T) {
+	svc, err := app.Open(t.TempDir(), "frontend-test")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer svc.Close()
+	ts := httptest.NewServer(NewServer(&fakeController{}, svc).Handler())
+	defer ts.Close()
+
+	first := postElectionStart(t, ts.URL)
+	second := postElectionStart(t, ts.URL)
+	if first.ElectionID != second.ElectionID || first.Title != second.Title || first.BallotsSeen != second.BallotsSeen {
+		t.Fatalf("start not idempotent: first=%+v second=%+v", first, second)
+	}
+}
+
+func postElectionStart(t *testing.T, baseURL string) app.ElectionStatus {
+	t.Helper()
+	resp, err := http.Post(baseURL+"/api/election/start", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST election start: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body app.ElectionStatus
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode start: %v", err)
+	}
+	return body
 }
 
 func testMultiaddr(t *testing.T, port int) string {
