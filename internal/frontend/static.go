@@ -86,28 +86,8 @@ no</textarea></label>
       </section>
 
       <section class="span-2">
-        <h2>Election Status</h2>
-        <dl>
-          <div><dt>Status</dt><dd id="election-available">loading...</dd></div>
-          <div><dt>Title</dt><dd id="election-title">loading...</dd></div>
-          <div><dt>Election ID</dt><dd id="election-id">loading...</dd></div>
-          <div><dt>Options</dt><dd><div id="election-options" class="list"></div></dd></div>
-          <div><dt>Accepted voter allowlist</dt><dd><div id="election-voters" class="list"></div></dd></div>
-          <div><dt>This node voting status</dt><dd id="local-voter">loading...</dd></div>
-          <div><dt>Tally key set</dt><dd id="tally-key-set">loading...</dd></div>
-          <div><dt>Valid ballots</dt><dd id="valid-ballots">loading...</dd></div>
-        </dl>
-        <div id="election-message" class="message muted"></div>
-      </section>
-
-      <section class="span-2">
-        <h2>Vote</h2>
-        <p id="vote-waiting" class="muted">Voting unlocks only after an invitation is accepted and finalized.</p>
-        <div id="vote-form" hidden>
-          <label>Choice<select id="vote-choice"></select></label>
-          <button id="cast-vote">Cast Vote</button>
-        </div>
-        <div id="vote-message" class="message muted"></div>
+        <h2>Elections</h2>
+        <div id="elections-list"></div>
       </section>
     </div>
   </main>
@@ -180,24 +160,107 @@ no</textarea></label>
     }
 
     function renderElectionStatus(status) {
-      $('create-section').hidden = Boolean(status.available);
-      $('election-available').textContent = status.available ? 'finalized locally' : 'not finalized locally';
-      $('election-title').textContent = status.title || 'not available yet';
-      $('election-id').textContent = status.election_id || 'not available yet';
-      renderList('election-options', status.available ? (status.options || []) : []);
-      renderList('election-voters', status.available ? (status.eligible_voter_ids || []) : []);
-      if (!status.available) {
-        $('local-voter').textContent = 'Accept an invitation, then wait for finalize.';
-      } else if (status.local_voter_id) {
-        $('local-voter').textContent = status.local_voter_signable ? ('Eligible: ' + status.local_voter_id) : ('Not in voter set: ' + status.local_voter_id);
-      } else {
-        $('local-voter').textContent = 'Local peer ID is not available.';
+      $('create-section').hidden = (status.elections || []).length > 0;
+      renderElections(status);
+      renderInvitations(status.invitations || [], status.pending_invitations || []);
+    }
+
+    function renderElections(status) {
+      const el = $('elections-list');
+      el.innerHTML = '';
+      const elections = status.elections || [];
+      if (!elections.length) {
+        el.innerHTML = '<p class="muted">No finalized elections.</p>';
+        return;
       }
-      $('tally-key-set').textContent = status.tally_key_set_available ? 'available' : 'not available';
-      $('valid-ballots').textContent = String(status.valid_ballot_count || 0);
-      $('election-message').textContent = status.message || '';
-      $('election-message').className = 'message ' + (status.available ? 'ok' : 'muted');
-      renderVoteForm(status);
+      for (const e of elections) {
+        const card = document.createElement('div');
+        card.className = 'invite-card';
+
+        const h3 = document.createElement('h3');
+        h3.style.cursor = 'pointer';
+        h3.textContent = '▾ ' + e.title + ' ' + (e.tally_key_set_available ? '[READY]' : '[PENDING TALLY]');
+        h3.onclick = () => {
+          const body = card.querySelector('.election-body');
+          body.hidden = !body.hidden;
+          h3.textContent = (body.hidden ? '▸ ' : '▾ ') + e.title + ' ' + (e.tally_key_set_available ? '[READY]' : '[PENDING TALLY]');
+        };
+        card.appendChild(h3);
+
+        const body = document.createElement('div');
+        body.className = 'election-body';
+        body.hidden = true;
+
+        const dl = document.createElement('dl');
+        const items = [
+          ['Election ID', e.election_id],
+          ['Options', (e.options || []).join(', ')],
+          ['Voters', (e.eligible_voter_ids || []).join(', ')],
+          ['Valid ballots', String(e.valid_ballot_count || 0) + '/' + String(e.ballots_seen || 0)],
+        ];
+        if (e.local_voter_id) {
+          items.push(['Your status', e.local_voter_signable ? (e.local_voter_voted ? 'Voted' : 'Eligible to vote') : 'Not in voter set']);
+        }
+        for (const [k, v] of items) {
+          const div = document.createElement('div');
+          const dt = document.createElement('dt');
+          dt.textContent = k;
+          const dd = document.createElement('dd');
+          dd.textContent = v;
+          div.append(dt, dd);
+          dl.appendChild(div);
+        }
+        body.appendChild(dl);
+
+        if (e.tally_key_set_available && e.local_voter_signable && !e.local_voter_voted) {
+          const select = document.createElement('select');
+          for (const opt of (e.options || [])) {
+            const o = document.createElement('option');
+            o.value = opt;
+            o.textContent = opt;
+            select.appendChild(o);
+          }
+          const btn = document.createElement('button');
+          btn.textContent = 'Vote';
+          btn.style.marginLeft = '8px';
+          const msg = document.createElement('span');
+          msg.className = 'message muted';
+          msg.style.marginLeft = '8px';
+          btn.onclick = async () => {
+            btn.disabled = true;
+            msg.textContent = '';
+            try {
+              const res = await fetch('/api/vote/cast', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({election_id: e.election_id, choice: select.value})
+              });
+              const data = await res.json();
+              if (!res.ok) {
+                msg.textContent = data.error;
+                msg.className = 'message bad';
+              } else {
+                msg.textContent = 'Voted: ' + data.choice;
+                msg.className = 'message ok';
+                btn.remove();
+                select.remove();
+                await refreshElectionStatus();
+              }
+            } catch(err) {
+              msg.textContent = err.message;
+              msg.className = 'message bad';
+            } finally {
+              btn.disabled = false;
+            }
+          };
+          body.appendChild(select);
+          body.appendChild(btn);
+          body.appendChild(msg);
+        }
+
+        card.appendChild(body);
+        el.appendChild(card);
+      }
     }
 
     function renderInvitations(invitations, pending) {
@@ -255,27 +318,6 @@ no</textarea></label>
         }
 
         el.appendChild(card);
-      }
-    }
-
-    function renderVoteForm(status) {
-      const ready = Boolean(status.available && status.tally_key_set_available);
-      const configured = Boolean(status.local_voter_id);
-      const signable = Boolean(status.local_voter_signable);
-      const voted = Boolean(status.local_voter_voted);
-      $('vote-waiting').hidden = ready && configured && signable && !voted;
-      $('vote-form').hidden = !ready || !configured || !signable || voted;
-      if (!ready) return $('vote-waiting').textContent = status.available ? 'Waiting for TallyKeySet.' : 'Waiting for accepted voters to be finalized.';
-      if (!configured) return $('vote-waiting').textContent = 'Local peer ID is not available.';
-      if (!signable) return $('vote-waiting').textContent = 'This node is not in the accepted voter set.';
-      if (voted) return $('vote-waiting').textContent = 'Vote already cast.';
-      const select = $('vote-choice');
-      select.innerHTML = '';
-      for (const opt of (status.options || [])) {
-        const o = document.createElement('option');
-        o.value = opt;
-        o.textContent = opt;
-        select.appendChild(o);
       }
     }
 
@@ -389,34 +431,6 @@ no</textarea></label>
         $('invite-message').className = 'message bad';
       } finally {
         $('create-invite').disabled = false;
-      }
-    };
-
-    $('cast-vote').onclick = async () => {
-      const choice = $('vote-choice').value;
-      if (!choice) return;
-      $('cast-vote').disabled = true;
-      $('vote-message').textContent = '';
-      try {
-        const res = await fetch('/api/vote/cast', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({choice})
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          $('vote-message').textContent = 'Error: ' + data.error;
-          $('vote-message').className = 'message bad';
-        } else {
-          $('vote-message').textContent = 'Vote cast: ' + data.choice + ' (status: ' + data.status + ')';
-          $('vote-message').className = 'message ok';
-          await refreshElectionStatus();
-        }
-      } catch(e) {
-        $('vote-message').textContent = 'Error: ' + e.message;
-        $('vote-message').className = 'message bad';
-      } finally {
-        $('cast-vote').disabled = false;
       }
     };
 

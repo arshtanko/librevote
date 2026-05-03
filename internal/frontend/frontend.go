@@ -33,7 +33,7 @@ type ElectionController interface {
 	AcceptElectionInvite(ctx context.Context, electionID, voterPeerID string) (app.ElectionStatus, error)
 	DeclineElectionInvite(ctx context.Context, electionID, voterPeerID string) (app.ElectionStatus, error)
 	FinalizeElectionInvite(ctx context.Context, electionID, requesterPeerID string) (app.ElectionStatus, error)
-	CastFrontendVote(ctx context.Context, voterID, choice string) (app.FrontendVoteResult, error)
+	CastFrontendVote(ctx context.Context, electionID, voterID, choice string) (app.FrontendVoteResult, error)
 }
 
 type localVoterElectionController interface {
@@ -104,8 +104,9 @@ type errorResponse struct {
 }
 
 type voteCastRequest struct {
-	VoterID string `json:"voter_id"`
-	Choice  string `json:"choice"`
+	ElectionID string `json:"election_id"`
+	VoterID    string `json:"voter_id"`
+	Choice     string `json:"choice"`
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -360,7 +361,7 @@ func (s *Server) handleVoteCast(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "voter_id does not match local voter binding"})
 		return
 	}
-	result, err := s.electionController.CastFrontendVote(r.Context(), localVoterID, req.Choice)
+	result, err := s.electionController.CastFrontendVote(r.Context(), req.ElectionID, localVoterID, req.Choice)
 	if err != nil {
 		writeJSON(w, voteErrorStatus(err), errorResponse{Error: err.Error()})
 		return

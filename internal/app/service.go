@@ -61,6 +61,7 @@ type ElectionStatus struct {
 	ElectionID           string                     `json:"election_id,omitempty"`
 	Title                string                     `json:"title,omitempty"`
 	Options              []string                   `json:"options,omitempty"`
+	Elections            []ElectionInfo             `json:"elections,omitempty"`
 	Invitations          []ElectionInvitationStatus `json:"invitations,omitempty"`
 	PendingInvitations   []ElectionInvitationStatus `json:"pending_invitations,omitempty"`
 	AcceptedVoterIDs     []string                   `json:"accepted_voter_ids,omitempty"`
@@ -74,6 +75,21 @@ type ElectionStatus struct {
 	BallotsSeen          int                        `json:"ballots_seen"`
 	ValidBallotCount     int                        `json:"valid_ballot_count"`
 	Message              string                     `json:"message,omitempty"`
+}
+
+type ElectionInfo struct {
+	ElectionID           string   `json:"election_id"`
+	Title                string   `json:"title"`
+	Options              []string `json:"options"`
+	EligibleVoterIDs     []string `json:"eligible_voter_ids"`
+	VoterIDs             []string `json:"-"`
+	Finalized            bool     `json:"finalized"`
+	TallyKeySetAvailable bool     `json:"tally_key_set_available"`
+	BallotsSeen          int      `json:"ballots_seen"`
+	ValidBallotCount     int      `json:"valid_ballot_count"`
+	LocalVoterID         string   `json:"local_voter_id,omitempty"`
+	LocalVoterSignable   bool     `json:"local_voter_signable"`
+	LocalVoterVoted      bool     `json:"local_voter_voted"`
 }
 
 type FrontendVoteResult struct {
@@ -192,55 +208,98 @@ func (s *Service) electionStatus(ctx context.Context, localPeerID string) (Elect
 		return ElectionStatus{Invitations: invitations, PendingInvitations: pending, Message: "no finalized election locally; create or accept an invitation"}, nil
 	}
 
-	envelope, err := s.LoadObjectEnvelope(ctx, refs[0].ObjectID)
-	if err != nil {
-		return ElectionStatus{}, fmt.Errorf("load election %s: %w", refs[0].ObjectID, err)
-	}
-	decoded, err := domain.DecodePayload(domain.ObjectTypeAnonymousElection, envelope.Payload)
-	if err != nil {
-		return ElectionStatus{}, fmt.Errorf("decode election %s: %w", refs[0].ObjectID, err)
-	}
-	election := decoded.(domain.AnonymousElectionPayload)
+	allElections := make([]ElectionInfo, 0, len(refs))
+	for _, ref := range refs {
+		envelope, err := s.LoadObjectEnvelope(ctx, ref.ObjectID)
+		if err != nil {
+			return ElectionStatus{}, fmt.Errorf("load election %s: %w", ref.ObjectID, err)
+		}
+		decoded, err := domain.DecodePayload(domain.ObjectTypeAnonymousElection, envelope.Payload)
+		if err != nil {
+			return ElectionStatus{}, fmt.Errorf("decode election %s: %w", ref.ObjectID, err)
+		}
+		election := decoded.(domain.AnonymousElectionPayload)
 
-	inputs, err := s.GetTallyComputationInputs(ctx, election.ElectionID)
+		inputs, err := s.GetTallyComputationInputs(ctx, election.ElectionID)
+		if err != nil {
+			return ElectionStatus{}, fmt.Errorf("load election tally inputs: %w", err)
+		}
+		eligibleVoterIDs := make([]string, 0, len(election.VoterAllowlist))
+		for _, voter := range election.VoterAllowlist {
+			eligibleVoterIDs = append(eligibleVoterIDs, voter.VoterID)
+		}
+		voterIDs := frontendSignableVoterIDs(election)
+		validBallots := 0
+		for _, ballot := range inputs.RetainedBallots {
+			if ballot.Status == validation.StatusValidForTally {
+				validBallots++
+			}
+		}
+
+		localVoterID := ""
+		localSignable := false
+		localVoted := false
+		if localPeerID != "" {
+			localVoterID = localPeerID
+			for _, signable := range voterIDs {
+				if signable == localPeerID {
+					localSignable = true
+					break
+				}
+			}
+			for _, ballot := range inputs.RetainedBallots {
+				if ballot.Status == validation.StatusValidForTally && ballot.Payload.VoterID == localPeerID {
+					localVoted = true
+					break
+				}
+			}
+		}
+
+		allElections = append(allElections, ElectionInfo{
+			ElectionID:           election.ElectionID,
+			Title:                election.Title,
+			Options:              append([]string(nil), election.Options...),
+			EligibleVoterIDs:     eligibleVoterIDs,
+			VoterIDs:             voterIDs,
+			Finalized:            true,
+			TallyKeySetAvailable: inputs.TallyKeySetFound,
+			BallotsSeen:          len(inputs.RetainedBallots),
+			ValidBallotCount:     validBallots,
+			LocalVoterID:         localVoterID,
+			LocalVoterSignable:   localSignable,
+			LocalVoterVoted:      localVoted,
+		})
+	}
+
+	// Primary election is the most recently finalized
+	primary := allElections[len(allElections)-1]
+	primaryInputs, err := s.GetTallyComputationInputs(ctx, primary.ElectionID)
 	if err != nil {
 		return ElectionStatus{}, fmt.Errorf("load election tally inputs: %w", err)
 	}
 	message := ""
-	if !inputs.TallyKeySetFound {
+	if !primaryInputs.TallyKeySetFound {
 		message = "waiting for valid TallyKeySet"
-	}
-	eligibleVoterIDs := make([]string, 0, len(election.VoterAllowlist))
-	for _, voter := range election.VoterAllowlist {
-		eligibleVoterIDs = append(eligibleVoterIDs, voter.VoterID)
-	}
-	voterIDs := frontendSignableVoterIDs(election)
-	if inputs.TallyKeySetFound && len(voterIDs) == 0 {
-		message = "election is available, but this node has no local signing keys for eligible voters"
-	} else if len(voterIDs) == 0 {
-		message = strings.TrimSpace(message + "; no local signing keys for eligible voters")
-	}
-	validBallots := 0
-	for _, ballot := range inputs.RetainedBallots {
-		if ballot.Status == validation.StatusValidForTally {
-			validBallots++
-		}
 	}
 
 	return ElectionStatus{
 		Available:            true,
-		ElectionID:           election.ElectionID,
-		Title:                election.Title,
-		Options:              append([]string(nil), election.Options...),
+		ElectionID:           primary.ElectionID,
+		Title:                primary.Title,
+		Options:              primary.Options,
+		Elections:            allElections,
 		Invitations:          invitations,
 		PendingInvitations:   pending,
-		AcceptedVoterIDs:     acceptedVotersForElection(invitations, election.ElectionID),
+		AcceptedVoterIDs:     acceptedVotersForElection(invitations, primary.ElectionID),
 		Finalized:            true,
-		VoterIDs:             voterIDs,
-		EligibleVoterIDs:     eligibleVoterIDs,
-		TallyKeySetAvailable: inputs.TallyKeySetFound,
-		BallotsSeen:          len(inputs.RetainedBallots),
-		ValidBallotCount:     validBallots,
+		VoterIDs:             primary.VoterIDs,
+		EligibleVoterIDs:     primary.EligibleVoterIDs,
+		TallyKeySetAvailable: primary.TallyKeySetAvailable,
+		BallotsSeen:          primary.BallotsSeen,
+		ValidBallotCount:     primary.ValidBallotCount,
+		LocalVoterID:         primary.LocalVoterID,
+		LocalVoterSignable:   primary.LocalVoterSignable,
+		LocalVoterVoted:      primary.LocalVoterVoted,
 		Message:              message,
 	}, nil
 }
@@ -810,9 +869,10 @@ func (s *Service) CastBallot(ctx context.Context, electionID, voterID, choice st
 	return s.ingestLocal(ctx, envelope, validation.StatusValidForTally)
 }
 
-func (s *Service) CastFrontendVote(ctx context.Context, voterID, choice string) (FrontendVoteResult, error) {
+func (s *Service) CastFrontendVote(ctx context.Context, electionID, voterID, choice string) (FrontendVoteResult, error) {
 	voterID = strings.TrimSpace(voterID)
 	choice = strings.TrimSpace(choice)
+	electionID = strings.TrimSpace(electionID)
 	if voterID == "" {
 		return FrontendVoteResult{}, fmt.Errorf("%w: voter_id is required", ErrFrontendVoterNotEligible)
 	}
@@ -820,7 +880,7 @@ func (s *Service) CastFrontendVote(ctx context.Context, voterID, choice string) 
 		return FrontendVoteResult{}, fmt.Errorf("%w: choice is required", ErrFrontendInvalidChoice)
 	}
 
-	election, err := s.currentAnonymousElection(ctx)
+	election, err := s.currentAnonymousElection(ctx, electionID)
 	if err != nil {
 		return FrontendVoteResult{}, err
 	}
@@ -948,23 +1008,26 @@ func (s *Service) LoadAnonymousElection(ctx context.Context, electionID string) 
 	return inputs.Election, nil
 }
 
-func (s *Service) currentAnonymousElection(ctx context.Context) (domain.AnonymousElectionPayload, error) {
+func (s *Service) currentAnonymousElection(ctx context.Context, electionID string) (domain.AnonymousElectionPayload, error) {
 	refs, err := s.ListServableObjectRefs(ctx, string(domain.ScopeNetwork), "", []string{string(domain.ObjectTypeAnonymousElection)})
 	if err != nil {
 		return domain.AnonymousElectionPayload{}, fmt.Errorf("load current election: %w", err)
 	}
-	if len(refs) == 0 {
-		return domain.AnonymousElectionPayload{}, ErrFrontendElectionUnavailable
+	for _, ref := range refs {
+		envelope, err := s.LoadObjectEnvelope(ctx, ref.ObjectID)
+		if err != nil {
+			return domain.AnonymousElectionPayload{}, fmt.Errorf("load election %s: %w", ref.ObjectID, err)
+		}
+		decoded, err := domain.DecodePayload(domain.ObjectTypeAnonymousElection, envelope.Payload)
+		if err != nil {
+			return domain.AnonymousElectionPayload{}, fmt.Errorf("decode election %s: %w", ref.ObjectID, err)
+		}
+		election := decoded.(domain.AnonymousElectionPayload)
+		if electionID == "" || election.ElectionID == electionID {
+			return election, nil
+		}
 	}
-	envelope, err := s.LoadObjectEnvelope(ctx, refs[0].ObjectID)
-	if err != nil {
-		return domain.AnonymousElectionPayload{}, fmt.Errorf("load election %s: %w", refs[0].ObjectID, err)
-	}
-	decoded, err := domain.DecodePayload(domain.ObjectTypeAnonymousElection, envelope.Payload)
-	if err != nil {
-		return domain.AnonymousElectionPayload{}, fmt.Errorf("decode election %s: %w", refs[0].ObjectID, err)
-	}
-	return decoded.(domain.AnonymousElectionPayload), nil
+	return domain.AnonymousElectionPayload{}, ErrFrontendElectionUnavailable
 }
 
 func frontendVoterEligible(election domain.AnonymousElectionPayload, voterID string, voterPublicKey ed25519.PublicKey) bool {
