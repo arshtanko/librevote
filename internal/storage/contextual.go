@@ -53,6 +53,9 @@ func (s *Store) DependencyStatus(ctx context.Context, dep validation.Dependency)
 		return "", false, errors.New("dependency type and id are required")
 	}
 	switch dep.Type {
+	case "election_invite":
+		_, status, found, err := s.ElectionInvitationByID(ctx, dep.ID)
+		return status, found, err
 	case "trustee_selection":
 		return s.statusForTrusteeSelectionID(ctx, dep.ID)
 	case "election":
@@ -183,6 +186,23 @@ func (s *Store) TrusteeSelectionElectionByID(ctx context.Context, selectionID st
 			return false, nil
 		}
 		out = election
+		return true, nil
+	})
+	return out, status, found, err
+}
+
+func (s *Store) ElectionInvitationByID(ctx context.Context, electionID string) (domain.ElectionInvitePayload, validation.Status, bool, error) {
+	var out domain.ElectionInvitePayload
+	status, found, err := s.payloadForDecodedPayload(ctx, domain.ObjectTypeElectionInvite, func(payload []byte) (bool, error) {
+		decoded, err := domain.DecodePayload(domain.ObjectTypeElectionInvite, payload)
+		if err != nil {
+			return false, err
+		}
+		invite := decoded.(domain.ElectionInvitePayload)
+		if invite.ElectionID != electionID {
+			return false, nil
+		}
+		out = invite
 		return true, nil
 	})
 	return out, status, found, err

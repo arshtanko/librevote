@@ -54,6 +54,8 @@ func (r Result) Error() error {
 var DependencyRank = map[string]int{
 	string(domain.ObjectTypeTrusteeSelectionElection): 0,
 	string(domain.ObjectTypeAnonymousElection):        0,
+	string(domain.ObjectTypeElectionInvite):           0,
+	string(domain.ObjectTypeElectionAcceptance):       1,
 	string(domain.ObjectTypeTrusteeNomination):        1,
 	string(domain.ObjectTypeTrusteeConsent):           1,
 	string(domain.ObjectTypeTrusteeVote):              2,

@@ -28,8 +28,11 @@ type Controller interface {
 }
 
 type ElectionController interface {
-	ElectionStatus(ctx context.Context) (app.ElectionStatus, error)
-	StartMVPElectionForVoters(ctx context.Context, voterIDs []string) (app.ElectionStatus, error)
+	ElectionStatus(ctx context.Context, localPeerID string) (app.ElectionStatus, error)
+	CreateElectionInvite(ctx context.Context, input app.CreateElectionInviteInput) (app.ElectionStatus, error)
+	AcceptElectionInvite(ctx context.Context, electionID, voterPeerID string) (app.ElectionStatus, error)
+	DeclineElectionInvite(ctx context.Context, electionID, voterPeerID string) (app.ElectionStatus, error)
+	FinalizeElectionInvite(ctx context.Context, electionID, requesterPeerID string) (app.ElectionStatus, error)
 	CastFrontendVote(ctx context.Context, voterID, choice string) (app.FrontendVoteResult, error)
 }
 
@@ -55,8 +58,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/network/status", s.handleStatus)
 	mux.HandleFunc("/api/network/connect", s.handleConnect)
-	mux.HandleFunc("/api/election/status", s.handleElectionStatus)
-	mux.HandleFunc("/api/election/start", s.handleElectionStart)
+	mux.HandleFunc("/api/elections/status", s.handleElectionStatus)
+	mux.HandleFunc("/api/elections/invite", s.handleElectionInvite)
+	mux.HandleFunc("/api/elections/accept", s.handleElectionAccept)
+	mux.HandleFunc("/api/elections/decline", s.handleElectionDecline)
+	mux.HandleFunc("/api/elections/finalize", s.handleElectionFinalize)
 	mux.HandleFunc("/api/vote/cast", s.handleVoteCast)
 	return mux
 }
@@ -66,6 +72,7 @@ type statusResponse struct {
 	PeerID                 string   `json:"peer_id"`
 	ListenMultiaddrs       []string `json:"listen_multiaddrs"`
 	ConnectedPeerCount     int      `json:"connected_peer_count"`
+	ConnectedPeerIDs       []string `json:"connected_peer_ids"`
 	ConnectedPeerLabel     string   `json:"connected_peer_label"`
 	BootstrapPeers         []string `json:"bootstrap_peers"`
 	BootstrapPeerCount     int      `json:"bootstrap_peer_count"`
@@ -185,6 +192,21 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type inviteRequest struct {
+	Title          string   `json:"title"`
+	Options        []string `json:"options"`
+	InvitedPeerIDs []string `json:"invited_peer_ids"`
+	IncludeSelf    bool     `json:"include_self"`
+}
+
+type acceptRequest struct {
+	ElectionID string `json:"election_id"`
+}
+
+type finalizeRequest struct {
+	ElectionID string `json:"election_id"`
+}
+
 func (s *Server) handleElectionStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
@@ -198,7 +220,7 @@ func (s *Server) handleElectionStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
-func (s *Server) handleElectionStart(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleElectionInvite(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
 		return
@@ -207,13 +229,107 @@ func (s *Server) handleElectionStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "election service is not available"})
 		return
 	}
-	status, err := s.electionController.StartMVPElectionForVoters(r.Context(), s.meshVoterIDs())
+	localPeerID := strings.TrimSpace(s.controller.PeerID())
+	if localPeerID == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "local peer ID is not available"})
+		return
+	}
+	defer r.Body.Close()
+	var req inviteRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON body"})
+		return
+	}
+	status, err := s.electionController.CreateElectionInvite(r.Context(), app.CreateElectionInviteInput{
+		Title:          req.Title,
+		Options:        req.Options,
+		InvitedPeerIDs: req.InvitedPeerIDs,
+		CreatorPeerID:  localPeerID,
+		IncludeSelf:    req.IncludeSelf,
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
 		return
 	}
-	if localStatus, localErr := s.electionStatus(r.Context()); localErr == nil {
-		status = localStatus
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleElectionAccept(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	if s.electionController == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "election service is not available"})
+		return
+	}
+	localPeerID := strings.TrimSpace(s.controller.PeerID())
+	if localPeerID == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "local peer ID is not available"})
+		return
+	}
+	defer r.Body.Close()
+	var req acceptRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON body"})
+		return
+	}
+	status, err := s.electionController.AcceptElectionInvite(r.Context(), req.ElectionID, localPeerID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleElectionDecline(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	if s.electionController == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "election service is not available"})
+		return
+	}
+	localPeerID := strings.TrimSpace(s.controller.PeerID())
+	if localPeerID == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "local peer ID is not available"})
+		return
+	}
+	defer r.Body.Close()
+	var req acceptRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON body"})
+		return
+	}
+	status, err := s.electionController.DeclineElectionInvite(r.Context(), req.ElectionID, localPeerID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleElectionFinalize(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	if s.electionController == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "election service is not available"})
+		return
+	}
+	defer r.Body.Close()
+	var req finalizeRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON body"})
+		return
+	}
+	localPeerID := strings.TrimSpace(s.controller.PeerID())
+	status, err := s.electionController.FinalizeElectionInvite(r.Context(), req.ElectionID, localPeerID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+		return
 	}
 	writeJSON(w, http.StatusOK, status)
 }
@@ -270,6 +386,7 @@ func (s *Server) status() statusResponse {
 		PeerID:                 s.controller.PeerID(),
 		ListenMultiaddrs:       s.controller.ListenMultiaddrs(),
 		ConnectedPeerCount:     s.controller.ConnectedPeerCount(),
+		ConnectedPeerIDs:       s.controller.ConnectedPeerIDs(),
 		ConnectedPeerLabel:     "currently connected libp2p peers",
 		BootstrapPeers:         bootstrap,
 		BootstrapPeerCount:     len(bootstrap),
@@ -281,19 +398,14 @@ func (s *Server) electionStatus(ctx context.Context) (app.ElectionStatus, error)
 	if s.electionController == nil {
 		return app.ElectionStatus{Message: "election service is not available"}, nil
 	}
-	status, err := s.electionController.ElectionStatus(ctx)
-	if err != nil || !status.Available {
-		return status, err
-	}
-	localVoterID := strings.TrimSpace(s.controller.PeerID())
-	if localVoterID == "" {
-		return status, nil
+	localPeerID := strings.TrimSpace(s.controller.PeerID())
+	if localPeerID == "" {
+		return s.electionController.ElectionStatus(ctx, "")
 	}
 	if controller, ok := s.electionController.(localVoterElectionController); ok {
-		return controller.ElectionStatusForLocalVoter(ctx, localVoterID)
+		return controller.ElectionStatusForLocalVoter(ctx, localPeerID)
 	}
-	status.LocalVoterID = localVoterID
-	return status, err
+	return s.electionController.ElectionStatus(ctx, localPeerID)
 }
 
 func (s *Server) meshVoterIDs() []string {

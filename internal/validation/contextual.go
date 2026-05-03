@@ -28,6 +28,10 @@ type dependencyStatusStore interface {
 	DependencyStatus(context.Context, Dependency) (Status, bool, error)
 }
 
+type ElectionInvitationInputStore interface {
+	ElectionInvitationByID(context.Context, string) (domain.ElectionInvitePayload, Status, bool, error)
+}
+
 // ContextualRule returns the dependencies and target status for one object type.
 // Rules must only use references they can identify without guessing from raw bytes.
 type ContextualRule func(context.Context, domain.ObjectEnvelope) (ContextualRuleResult, error)
@@ -184,6 +188,9 @@ func defaultContextualRules(store ContextualStore) map[domain.ObjectType]Context
 	}
 	return map[domain.ObjectType]ContextualRule{
 		domain.ObjectTypeTrusteeSelectionElection: root,
+		domain.ObjectTypeElectionInvite:           root,
+		domain.ObjectTypeElectionAcceptance:       contextualElectionAcceptanceWithStore(store),
+		domain.ObjectTypeElectionDecline:          contextualElectionDeclineWithStore(store),
 		domain.ObjectTypeTrusteeNomination:        contextualTrusteeNomination(store),
 		domain.ObjectTypeTrusteeVote:              contextualTrusteeVote(store),
 		domain.ObjectTypeTrusteeSelectionResult:   contextualTrusteeSelectionResult(store),
@@ -229,6 +236,69 @@ func decodePayload[T any](envelope domain.ObjectEnvelope) (T, error) {
 		return zero, fmt.Errorf("decoded %s payload has type %T", envelope.ObjectType, decoded)
 	}
 	return payload, nil
+}
+
+func contextualElectionAcceptanceWithStore(store ContextualStore) ContextualRule {
+	return func(ctx context.Context, envelope domain.ObjectEnvelope) (ContextualRuleResult, error) {
+		inputStore, ok := store.(ElectionInvitationInputStore)
+		if !ok {
+			return ContextualRuleResult{}, fmt.Errorf("%w for %s contextual validation", ErrContextualRuleUnsupported, envelope.ObjectType)
+		}
+		payload, err := decodePayload[domain.ElectionAcceptancePayload](envelope)
+		if err != nil {
+			return ContextualRuleResult{}, err
+		}
+		invite, status, found, err := inputStore.ElectionInvitationByID(ctx, payload.ElectionID)
+		if err != nil {
+			return ContextualRuleResult{}, err
+		}
+		if !found || !status.Final() {
+			return ContextualRuleResult{Status: StatusPendingDependencies, RequiredDependencies: []RequiredDependency{RequireObject("election_invite", payload.ElectionID, StatusValid)}}, nil
+		}
+		if status != StatusValid {
+			return ContextualRuleResult{Status: StatusInvalid, ValidationErrorCode: "election_acceptance_invalid", ValidationErrorReason: "referenced election invite has status " + status.String()}, nil
+		}
+		if !stringInSlice(invite.InvitedPeerIDs, payload.VoterPeerID) {
+			return ContextualRuleResult{Status: StatusInvalid, ValidationErrorCode: "election_acceptance_invalid", ValidationErrorReason: "accepting peer is not invited"}, nil
+		}
+		return ContextualRuleResult{Status: StatusValid, ConflictKeys: []ConflictKey{{Group: "election_acceptance_conflict_key", Key: payload.ElectionID + "|" + payload.VoterPeerID}}}, nil
+	}
+}
+
+func contextualElectionDeclineWithStore(store ContextualStore) ContextualRule {
+	return func(ctx context.Context, envelope domain.ObjectEnvelope) (ContextualRuleResult, error) {
+		inputStore, ok := store.(ElectionInvitationInputStore)
+		if !ok {
+			return ContextualRuleResult{}, fmt.Errorf("%w for %s contextual validation", ErrContextualRuleUnsupported, envelope.ObjectType)
+		}
+		payload, err := decodePayload[domain.ElectionDeclinePayload](envelope)
+		if err != nil {
+			return ContextualRuleResult{}, err
+		}
+		invite, status, found, err := inputStore.ElectionInvitationByID(ctx, payload.ElectionID)
+		if err != nil {
+			return ContextualRuleResult{}, err
+		}
+		if !found || !status.Final() {
+			return ContextualRuleResult{Status: StatusPendingDependencies, RequiredDependencies: []RequiredDependency{RequireObject("election_invite", payload.ElectionID, StatusValid)}}, nil
+		}
+		if status != StatusValid {
+			return ContextualRuleResult{Status: StatusInvalid, ValidationErrorCode: "election_decline_invalid", ValidationErrorReason: "referenced election invite has status " + status.String()}, nil
+		}
+		if !stringInSlice(invite.InvitedPeerIDs, payload.VoterPeerID) {
+			return ContextualRuleResult{Status: StatusInvalid, ValidationErrorCode: "election_decline_invalid", ValidationErrorReason: "declining peer is not invited"}, nil
+		}
+		return ContextualRuleResult{Status: StatusValid, ConflictKeys: []ConflictKey{{Group: "election_decline_conflict_key", Key: payload.ElectionID + "|" + payload.VoterPeerID}}}, nil
+	}
+}
+
+func stringInSlice(values []string, want string) bool {
+	for _, v := range values {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TrusteeSelectionResultDependencyID deterministically binds a result dependency

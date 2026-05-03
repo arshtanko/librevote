@@ -45,6 +45,27 @@ type TrusteeSelectionElectionPayload struct {
 	Signature          []byte
 }
 
+type ElectionInvitePayload struct {
+	ElectionID     string
+	Title          string
+	Options        []string
+	CreatorPeerID  string
+	InvitedPeerIDs []string
+	CreatedAt      int64
+}
+
+type ElectionAcceptancePayload struct {
+	ElectionID  string
+	VoterPeerID string
+	CreatedAt   int64
+}
+
+type ElectionDeclinePayload struct {
+	ElectionID  string
+	VoterPeerID string
+	CreatedAt   int64
+}
+
 type TrusteeNominationPayload struct {
 	TrusteeSelectionID           string
 	CandidatePublicKey           []byte
@@ -193,6 +214,12 @@ func DecodePayload(objectType ObjectType, payload []byte) (any, error) {
 	switch objectType {
 	case ObjectTypeTrusteeSelectionElection:
 		return decodeTrusteeSelectionElection(payload)
+	case ObjectTypeElectionInvite:
+		return decodeElectionInvite(payload)
+	case ObjectTypeElectionAcceptance:
+		return decodeElectionAcceptance(payload)
+	case ObjectTypeElectionDecline:
+		return decodeElectionDecline(payload)
 	case ObjectTypeTrusteeNomination:
 		return decodeTrusteeNomination(payload)
 	case ObjectTypeTrusteeVote:
@@ -225,6 +252,12 @@ func ValidatePayloadShape(objectType ObjectType, payload []byte) error {
 	switch p := decoded.(type) {
 	case TrusteeSelectionElectionPayload:
 		return validateTrusteeSelectionElection(p)
+	case ElectionInvitePayload:
+		return validateElectionInvite(p)
+	case ElectionAcceptancePayload:
+		return validateElectionAcceptance(p)
+	case ElectionDeclinePayload:
+		return validateElectionDecline(p)
 	case TrusteeNominationPayload:
 		return validateTrusteeNomination(p)
 	case TrusteeVotePayload:
@@ -293,6 +326,66 @@ func decodeTrusteeSelectionElection(payload []byte) (TrusteeSelectionElectionPay
 			return unknownField(field)
 		}
 		return nil
+	})
+	return p, err
+}
+
+func decodeElectionInvite(payload []byte) (ElectionInvitePayload, error) {
+	var p ElectionInvitePayload
+	seen := map[uint64]struct{}{}
+	err := rangeProtoFields(payload, func(field uint64, wire uint64, value []byte) error {
+		switch field {
+		case 1:
+			return setString(seen, field, wire, value, &p.ElectionID)
+		case 2:
+			return setString(seen, field, wire, value, &p.Title)
+		case 3:
+			return appendString(wire, value, &p.Options)
+		case 4:
+			return setString(seen, field, wire, value, &p.CreatorPeerID)
+		case 5:
+			return appendString(wire, value, &p.InvitedPeerIDs)
+		case 6:
+			return setInt64(seen, field, wire, value, &p.CreatedAt)
+		default:
+			return unknownField(field)
+		}
+	})
+	return p, err
+}
+
+func decodeElectionAcceptance(payload []byte) (ElectionAcceptancePayload, error) {
+	var p ElectionAcceptancePayload
+	seen := map[uint64]struct{}{}
+	err := rangeProtoFields(payload, func(field uint64, wire uint64, value []byte) error {
+		switch field {
+		case 1:
+			return setString(seen, field, wire, value, &p.ElectionID)
+		case 2:
+			return setString(seen, field, wire, value, &p.VoterPeerID)
+		case 3:
+			return setInt64(seen, field, wire, value, &p.CreatedAt)
+		default:
+			return unknownField(field)
+		}
+	})
+	return p, err
+}
+
+func decodeElectionDecline(payload []byte) (ElectionDeclinePayload, error) {
+	var p ElectionDeclinePayload
+	seen := map[uint64]struct{}{}
+	err := rangeProtoFields(payload, func(field uint64, wire uint64, value []byte) error {
+		switch field {
+		case 1:
+			return setString(seen, field, wire, value, &p.ElectionID)
+		case 2:
+			return setString(seen, field, wire, value, &p.VoterPeerID)
+		case 3:
+			return setInt64(seen, field, wire, value, &p.CreatedAt)
+		default:
+			return unknownField(field)
+		}
 	})
 	return p, err
 }
@@ -672,6 +765,36 @@ func validateTrusteeSelectionElection(p TrusteeSelectionElectionPayload) error {
 		return err
 	}
 	return validatePublicSignature(p.CreatorPublicKey, p.Signature)
+}
+
+func validateElectionInvite(p ElectionInvitePayload) error {
+	if p.ElectionID == "" || p.Title == "" || p.CreatorPeerID == "" || p.CreatedAt <= 0 {
+		return errors.New("required election invite fields are missing")
+	}
+	if len(p.Options) < 2 {
+		return errors.New("election invite requires at least two options")
+	}
+	if duplicateStrings(p.Options) {
+		return errors.New("election invite options contain duplicates")
+	}
+	if len(p.InvitedPeerIDs) == 0 || duplicateStrings(p.InvitedPeerIDs) {
+		return errors.New("election invite peer list is empty or contains duplicates")
+	}
+	return nil
+}
+
+func validateElectionAcceptance(p ElectionAcceptancePayload) error {
+	if p.ElectionID == "" || p.VoterPeerID == "" || p.CreatedAt <= 0 {
+		return errors.New("required election acceptance fields are missing")
+	}
+	return nil
+}
+
+func validateElectionDecline(p ElectionDeclinePayload) error {
+	if p.ElectionID == "" || p.VoterPeerID == "" || p.CreatedAt <= 0 {
+		return errors.New("required election decline fields are missing")
+	}
+	return nil
 }
 
 func validateTrusteeNomination(p TrusteeNominationPayload) error {
@@ -1205,6 +1328,37 @@ func EncodeTrusteeSelectionElectionPayload(p TrusteeSelectionElectionPayload) []
 	b.int64Field(14, p.MaxChoicesPerVote)
 	b.bytesField(15, p.CreatorPublicKey)
 	b.bytesField(16, p.Signature)
+	return b.Bytes()
+}
+
+func EncodeElectionInvitePayload(p ElectionInvitePayload) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, p.ElectionID)
+	b.stringField(2, p.Title)
+	for _, option := range p.Options {
+		b.stringField(3, option)
+	}
+	b.stringField(4, p.CreatorPeerID)
+	for _, peerID := range p.InvitedPeerIDs {
+		b.stringField(5, peerID)
+	}
+	b.int64Field(6, p.CreatedAt)
+	return b.Bytes()
+}
+
+func EncodeElectionAcceptancePayload(p ElectionAcceptancePayload) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, p.ElectionID)
+	b.stringField(2, p.VoterPeerID)
+	b.int64Field(3, p.CreatedAt)
+	return b.Bytes()
+}
+
+func EncodeElectionDeclinePayload(p ElectionDeclinePayload) []byte {
+	var b domainPayloadBuilder
+	b.stringField(1, p.ElectionID)
+	b.stringField(2, p.VoterPeerID)
+	b.int64Field(3, p.CreatedAt)
 	return b.Bytes()
 }
 

@@ -33,20 +33,46 @@ type Service struct {
 	networkID string
 }
 
+type CreateElectionInviteInput struct {
+	Title          string
+	Options        []string
+	InvitedPeerIDs []string
+	CreatorPeerID  string
+	IncludeSelf    bool
+}
+
+type ElectionInvitationStatus struct {
+	ElectionID      string   `json:"election_id"`
+	Title           string   `json:"title"`
+	Options         []string `json:"options"`
+	CreatorPeerID   string   `json:"creator_peer_id"`
+	InvitedPeerIDs  []string `json:"invited_peer_ids"`
+	AcceptedPeerIDs []string `json:"accepted_peer_ids"`
+	DeclinedPeerIDs []string `json:"declined_peer_ids"`
+	LocalInvited    bool     `json:"local_invited"`
+	LocalAccepted   bool     `json:"local_accepted"`
+	LocalDeclined   bool     `json:"local_declined"`
+	Finalized       bool     `json:"finalized"`
+}
+
 type ElectionStatus struct {
-	Available            bool     `json:"available"`
-	ElectionID           string   `json:"election_id,omitempty"`
-	Title                string   `json:"title,omitempty"`
-	Options              []string `json:"options,omitempty"`
-	VoterIDs             []string `json:"voter_ids,omitempty"`
-	EligibleVoterIDs     []string `json:"eligible_voter_ids,omitempty"`
-	LocalVoterID         string   `json:"local_voter_id,omitempty"`
-	LocalVoterSignable   bool     `json:"local_voter_signable"`
-	LocalVoterVoted      bool     `json:"local_voter_voted"`
-	TallyKeySetAvailable bool     `json:"tally_key_set_available"`
-	BallotsSeen          int      `json:"ballots_seen"`
-	ValidBallotCount     int      `json:"valid_ballot_count"`
-	Message              string   `json:"message,omitempty"`
+	Available            bool                       `json:"available"`
+	ElectionID           string                     `json:"election_id,omitempty"`
+	Title                string                     `json:"title,omitempty"`
+	Options              []string                   `json:"options,omitempty"`
+	Invitations          []ElectionInvitationStatus `json:"invitations,omitempty"`
+	PendingInvitations   []ElectionInvitationStatus `json:"pending_invitations,omitempty"`
+	AcceptedVoterIDs     []string                   `json:"accepted_voter_ids,omitempty"`
+	Finalized            bool                       `json:"finalized"`
+	VoterIDs             []string                   `json:"voter_ids,omitempty"`
+	EligibleVoterIDs     []string                   `json:"eligible_voter_ids,omitempty"`
+	LocalVoterID         string                     `json:"local_voter_id,omitempty"`
+	LocalVoterSignable   bool                       `json:"local_voter_signable"`
+	LocalVoterVoted      bool                       `json:"local_voter_voted"`
+	TallyKeySetAvailable bool                       `json:"tally_key_set_available"`
+	BallotsSeen          int                        `json:"ballots_seen"`
+	ValidBallotCount     int                        `json:"valid_ballot_count"`
+	Message              string                     `json:"message,omitempty"`
 }
 
 type FrontendVoteResult struct {
@@ -151,13 +177,18 @@ func (s *Service) IngestSyncEnvelope(ctx context.Context, envelope domain.Object
 	return err
 }
 
-func (s *Service) ElectionStatus(ctx context.Context) (ElectionStatus, error) {
+func (s *Service) electionStatus(ctx context.Context, localPeerID string) (ElectionStatus, error) {
+	invitations, err := s.invitationStatuses(ctx, localPeerID)
+	if err != nil {
+		return ElectionStatus{}, err
+	}
+	pending := pendingInvitations(invitations)
 	refs, err := s.ListServableObjectRefs(ctx, string(domain.ScopeNetwork), "", []string{string(domain.ObjectTypeAnonymousElection)})
 	if err != nil {
 		return ElectionStatus{}, fmt.Errorf("election status: %w", err)
 	}
 	if len(refs) == 0 {
-		return ElectionStatus{Message: "waiting for a synced election or local start"}, nil
+		return ElectionStatus{Invitations: invitations, PendingInvitations: pending, Message: "no finalized election locally; create or accept an invitation"}, nil
 	}
 
 	envelope, err := s.LoadObjectEnvelope(ctx, refs[0].ObjectID)
@@ -200,6 +231,10 @@ func (s *Service) ElectionStatus(ctx context.Context) (ElectionStatus, error) {
 		ElectionID:           election.ElectionID,
 		Title:                election.Title,
 		Options:              append([]string(nil), election.Options...),
+		Invitations:          invitations,
+		PendingInvitations:   pending,
+		AcceptedVoterIDs:     acceptedVotersForElection(invitations, election.ElectionID),
+		Finalized:            true,
 		VoterIDs:             voterIDs,
 		EligibleVoterIDs:     eligibleVoterIDs,
 		TallyKeySetAvailable: inputs.TallyKeySetFound,
@@ -209,9 +244,13 @@ func (s *Service) ElectionStatus(ctx context.Context) (ElectionStatus, error) {
 	}, nil
 }
 
+func (s *Service) ElectionStatus(ctx context.Context, localPeerID string) (ElectionStatus, error) {
+	return s.electionStatus(ctx, localPeerID)
+}
+
 func (s *Service) ElectionStatusForLocalVoter(ctx context.Context, voterID string) (ElectionStatus, error) {
 	voterID = strings.TrimSpace(voterID)
-	status, err := s.ElectionStatus(ctx)
+	status, err := s.ElectionStatus(ctx, voterID)
 	if err != nil {
 		return ElectionStatus{}, err
 	}
@@ -242,7 +281,7 @@ func (s *Service) ElectionStatusForLocalVoter(ctx context.Context, voterID strin
 }
 
 func (s *Service) StartMVPElectionForVoters(ctx context.Context, voterIDs []string) (ElectionStatus, error) {
-	status, err := s.ElectionStatus(ctx)
+	status, err := s.ElectionStatus(ctx, "")
 	if err != nil {
 		return ElectionStatus{}, err
 	}
@@ -260,7 +299,197 @@ func (s *Service) StartMVPElectionForVoters(ctx context.Context, voterIDs []stri
 	if err := s.createDeterministicMVPElectionObjects(ctx, voterIDs); err != nil {
 		return ElectionStatus{}, err
 	}
-	return s.ElectionStatus(ctx)
+	return s.ElectionStatus(ctx, "")
+}
+
+func (s *Service) CreateElectionInvite(ctx context.Context, input CreateElectionInviteInput) (ElectionStatus, error) {
+	creatorPeerID := strings.TrimSpace(input.CreatorPeerID)
+	if creatorPeerID == "" {
+		return ElectionStatus{}, errors.New("creator peer ID is required")
+	}
+	title := strings.TrimSpace(input.Title)
+	if title == "" {
+		return ElectionStatus{}, errors.New("election title is required")
+	}
+	options := normalizeOptions(input.Options)
+	if len(options) < 2 {
+		return ElectionStatus{}, errors.New("at least two election options are required")
+	}
+	invited := normalizeVoterIDs(input.InvitedPeerIDs)
+	if input.IncludeSelf {
+		invited = normalizeVoterIDs(append(invited, creatorPeerID))
+	}
+	if len(invited) == 0 {
+		return ElectionStatus{}, errors.New("at least one invited peer is required")
+	}
+	createdAt := time.Now().UnixMilli()
+	electionID := frontendElectionID(title, options, invited, creatorPeerID, createdAt)
+	payload := domain.ElectionInvitePayload{
+		ElectionID:     electionID,
+		Title:          title,
+		Options:        options,
+		CreatorPeerID:  creatorPeerID,
+		InvitedPeerIDs: invited,
+		CreatedAt:      createdAt,
+	}
+	envelope, err := s.buildEnvelope(domain.ObjectTypeElectionInvite, domain.ScopeNetwork, "", domain.EncodeElectionInvitePayload(payload), createdAt)
+	if err != nil {
+		return ElectionStatus{}, err
+	}
+	if _, err := s.ingestLocal(ctx, envelope, validation.StatusValid); err != nil {
+		return ElectionStatus{}, fmt.Errorf("create election invite: %w", err)
+	}
+	if input.IncludeSelf {
+		if _, err := s.createElectionAcceptance(ctx, electionID, creatorPeerID); err != nil {
+			return ElectionStatus{}, err
+		}
+	}
+	return s.electionStatus(ctx, creatorPeerID)
+}
+
+func (s *Service) AcceptElectionInvite(ctx context.Context, electionID, voterPeerID string) (ElectionStatus, error) {
+	voterPeerID = strings.TrimSpace(voterPeerID)
+	if voterPeerID == "" {
+		return ElectionStatus{}, errors.New("voter peer ID is required")
+	}
+	if _, err := s.createElectionAcceptance(ctx, strings.TrimSpace(electionID), voterPeerID); err != nil {
+		return ElectionStatus{}, err
+	}
+	return s.electionStatus(ctx, voterPeerID)
+}
+
+func (s *Service) FinalizeElectionInvite(ctx context.Context, electionID, requesterPeerID string) (ElectionStatus, error) {
+	electionID = strings.TrimSpace(electionID)
+	requesterPeerID = strings.TrimSpace(requesterPeerID)
+	if electionID == "" {
+		return ElectionStatus{}, errors.New("election_id is required")
+	}
+	if s.anonymousElectionExists(ctx, electionID) {
+		return s.electionStatus(ctx, requesterPeerID)
+	}
+	invite, accepted, err := s.inviteWithAcceptedVoters(ctx, electionID)
+	if err != nil {
+		return ElectionStatus{}, err
+	}
+	if requesterPeerID != "" && invite.CreatorPeerID != requesterPeerID {
+		return ElectionStatus{}, errors.New("only the election creator can finalize")
+	}
+	if len(accepted) == 0 && len(invite.InvitedPeerIDs) > 0 {
+		return ElectionStatus{}, errors.New("cannot finalize election without accepted voters")
+	}
+	if !s.allInvitedResponded(ctx, electionID, invite.InvitedPeerIDs) {
+		return ElectionStatus{}, errors.New("cannot finalize until all invited peers have responded (accepted or declined)")
+	}
+	if err := s.createDeterministicMVPElectionObjectsForInvite(ctx, invite, accepted); err != nil {
+		return ElectionStatus{}, err
+	}
+	return s.electionStatus(ctx, invite.CreatorPeerID)
+}
+
+func (s *Service) allInvitedResponded(ctx context.Context, electionID string, invitedPeerIDs []string) bool {
+	statuses, err := s.invitationStatuses(ctx, "")
+	if err != nil {
+		return false
+	}
+	for _, candidate := range statuses {
+		if candidate.ElectionID != electionID {
+			continue
+		}
+		responded := make(map[string]bool)
+		for _, id := range candidate.AcceptedPeerIDs {
+			responded[id] = true
+		}
+		for _, id := range candidate.DeclinedPeerIDs {
+			responded[id] = true
+		}
+		for _, id := range invitedPeerIDs {
+			if !responded[id] {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func (s *Service) DeclineElectionInvite(ctx context.Context, electionID, voterPeerID string) (ElectionStatus, error) {
+	electionID = strings.TrimSpace(electionID)
+	voterPeerID = strings.TrimSpace(voterPeerID)
+	if electionID == "" {
+		return ElectionStatus{}, errors.New("election_id is required")
+	}
+	if voterPeerID == "" {
+		return ElectionStatus{}, errors.New("voter peer ID is required")
+	}
+	if s.anonymousElectionExists(ctx, electionID) {
+		return s.electionStatus(ctx, voterPeerID)
+	}
+	if _, err := s.createElectionDecline(ctx, electionID, voterPeerID); err != nil {
+		return ElectionStatus{}, err
+	}
+	return s.electionStatus(ctx, voterPeerID)
+}
+
+func (s *Service) createElectionAcceptance(ctx context.Context, electionID, voterPeerID string) (domain.ObjectEnvelope, error) {
+	if electionID == "" {
+		return domain.ObjectEnvelope{}, errors.New("election_id is required")
+	}
+	refs, err := s.ListServableObjectRefs(ctx, string(domain.ScopeNetwork), "", []string{string(domain.ObjectTypeElectionAcceptance)})
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+	for _, ref := range refs {
+		envelope, err := s.LoadObjectEnvelope(ctx, ref.ObjectID)
+		if err != nil {
+			return domain.ObjectEnvelope{}, err
+		}
+		decoded, err := domain.DecodePayload(domain.ObjectTypeElectionAcceptance, envelope.Payload)
+		if err != nil {
+			return domain.ObjectEnvelope{}, err
+		}
+		acceptance := decoded.(domain.ElectionAcceptancePayload)
+		if acceptance.ElectionID == electionID && acceptance.VoterPeerID == voterPeerID {
+			return envelope, nil
+		}
+	}
+	createdAt := time.Now().UnixMilli()
+	payload := domain.ElectionAcceptancePayload{ElectionID: electionID, VoterPeerID: voterPeerID, CreatedAt: createdAt}
+	envelope, err := s.buildEnvelope(domain.ObjectTypeElectionAcceptance, domain.ScopeNetwork, "", domain.EncodeElectionAcceptancePayload(payload), createdAt)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+	return s.ingestLocal(ctx, envelope, validation.StatusValid)
+}
+
+func (s *Service) createElectionDecline(ctx context.Context, electionID, voterPeerID string) (domain.ObjectEnvelope, error) {
+	if electionID == "" {
+		return domain.ObjectEnvelope{}, errors.New("election_id is required")
+	}
+	refs, err := s.ListServableObjectRefs(ctx, string(domain.ScopeNetwork), "", []string{string(domain.ObjectTypeElectionDecline)})
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+	for _, ref := range refs {
+		envelope, err := s.LoadObjectEnvelope(ctx, ref.ObjectID)
+		if err != nil {
+			return domain.ObjectEnvelope{}, err
+		}
+		decoded, err := domain.DecodePayload(domain.ObjectTypeElectionDecline, envelope.Payload)
+		if err != nil {
+			return domain.ObjectEnvelope{}, err
+		}
+		decline := decoded.(domain.ElectionDeclinePayload)
+		if decline.ElectionID == electionID && decline.VoterPeerID == voterPeerID {
+			return envelope, nil
+		}
+	}
+	createdAt := time.Now().UnixMilli()
+	payload := domain.ElectionDeclinePayload{ElectionID: electionID, VoterPeerID: voterPeerID, CreatedAt: createdAt}
+	envelope, err := s.buildEnvelope(domain.ObjectTypeElectionDecline, domain.ScopeNetwork, "", domain.EncodeElectionDeclinePayload(payload), createdAt)
+	if err != nil {
+		return domain.ObjectEnvelope{}, err
+	}
+	return s.ingestLocal(ctx, envelope, validation.StatusValid)
 }
 
 // EvictPendingPayload delegates to the storage layer to evict a pending
@@ -933,6 +1162,262 @@ func (s *Service) createDeterministicMVPElectionObjects(ctx context.Context, vot
 	return nil
 }
 
+func (s *Service) createDeterministicMVPElectionObjectsForInvite(ctx context.Context, invite domain.ElectionInvitePayload, voterIDs []string) error {
+	const selectionID = "invite-trustee-selection"
+	candidateNames := []string{"trustee-1", "trustee-2", "trustee-3"}
+
+	voters := make([]domain.VoterEntry, len(voterIDs))
+	for i, name := range voterIDs {
+		voters[i] = domain.VoterEntry{
+			VoterID:                  name,
+			VoterSigningPublicKey:    deterministicEd25519Pub(name),
+			VoterEncryptionPublicKey: deterministicBytes(name+".enc", 32),
+		}
+	}
+
+	creatorPriv := deterministicEd25519Priv("creator")
+	selectionPayload := domain.TrusteeSelectionElectionPayload{
+		TrusteeSelectionID: selectionID,
+		NetworkID:          s.networkID,
+		Title:              invite.Title,
+		Description:        "Invitation-based trustee selection",
+		VoterAllowlist:     voters,
+		NominationStartsAt: 1000,
+		NominationEndsAt:   2000,
+		VotingStartsAt:     3000,
+		VotingEndsAt:       4000,
+		ConsentStartsAt:    5000,
+		ConsentEndsAt:      6000,
+		TrusteeCountN:      domain.TrusteeCountV1,
+		ThresholdT:         domain.ThresholdV1,
+		MaxChoicesPerVote:  domain.MaxChoicesPerVoteV1,
+	}
+	if _, err := s.CreateTrusteeSelectionElection(ctx, selectionPayload, creatorPriv, 500); err != nil {
+		return fmt.Errorf("invite election trustee selection: %w", err)
+	}
+
+	candidateKeys := make([]ed25519.PrivateKey, len(candidateNames))
+	selectedCandidateKeys := make([][]byte, len(candidateNames))
+	for i, name := range candidateNames {
+		candidateKeys[i] = deterministicEd25519Priv(name)
+		candidatePub := deterministicEd25519Pub(name)
+		selectedCandidateKeys[i] = candidatePub
+		payload := domain.TrusteeNominationPayload{
+			TrusteeSelectionID:           selectionID,
+			CandidatePublicKey:           candidatePub,
+			CandidateBlindTokenPublicKey: deterministicBytes(name+".blind", 32),
+			CandidateNodePeerID:          "invite-local-peer",
+			Statement:                    "Deterministic invite trustee candidate " + name,
+		}
+		if _, err := s.CreateTrusteeNomination(ctx, payload, candidateKeys[i], 1500); err != nil {
+			return fmt.Errorf("invite election nomination %s: %w", name, err)
+		}
+	}
+
+	voterPriv := deterministicEd25519Priv(voterIDs[0])
+	votePayload := domain.TrusteeVotePayload{
+		TrusteeSelectionID:    selectionID,
+		VoterPublicKey:        deterministicEd25519Pub(voterIDs[0]),
+		SelectedCandidateKeys: selectedCandidateKeys,
+	}
+	if _, err := s.CreateTrusteeVote(ctx, votePayload, voterPriv, 3500); err != nil {
+		return fmt.Errorf("invite election trustee vote: %w", err)
+	}
+
+	reporterPriv := deterministicEd25519Priv("reporter")
+	reporterPub := deterministicEd25519Pub("reporter")
+	resultEnv, err := s.BuildTrusteeSelectionResult(ctx, selectionID, reporterPub, reporterPriv)
+	if err != nil {
+		return fmt.Errorf("invite election trustee result: %w", err)
+	}
+	decodedResult, err := domain.DecodePayload(domain.ObjectTypeTrusteeSelectionResult, resultEnv.Payload)
+	if err != nil {
+		return fmt.Errorf("invite election decode trustee result: %w", err)
+	}
+	result := decodedResult.(domain.TrusteeSelectionResultPayload)
+
+	electionPayload := domain.AnonymousElectionPayload{
+		ElectionID:                 invite.ElectionID,
+		NetworkID:                  s.networkID,
+		Title:                      invite.Title,
+		Description:                "Invitation-based election",
+		Options:                    invite.Options,
+		VoterAllowlist:             voters,
+		TrusteeSelectionID:         selectionID,
+		TrusteeSelectionResultHash: result.ResultHash,
+		ThresholdT:                 domain.ThresholdV1,
+		TrusteeCountN:              domain.TrusteeCountV1,
+		EligibilityScheme:          domain.EligibilitySchemeBlindTokenV1,
+		IssuanceStartsAt:           7000,
+		IssuanceEndsAt:             8000,
+		VotingStartsAt:             9000,
+		VotingEndsAt:               10000,
+		TallyStartsAt:              11000,
+	}
+	if _, err := s.CreateAnonymousElection(ctx, electionPayload, creatorPriv, 6000); err != nil {
+		return fmt.Errorf("invite election anonymous election: %w", err)
+	}
+
+	electionHash := validation.ComputeElectionParametersHash(electionPayload)
+	for i, name := range candidateNames {
+		payload := domain.TrusteeConsentPayload{
+			TrusteeSelectionID:         selectionID,
+			TrusteeSelectionResultHash: result.ResultHash,
+			ElectionID:                 invite.ElectionID,
+			ElectionParametersHash:     electionHash,
+			TrusteePublicKey:           deterministicEd25519Pub(name),
+			TrusteeTallySetupPublicKey: deterministicBytes(name+".tally-setup", 32),
+			ThresholdT:                 domain.ThresholdV1,
+			TrusteeCountN:              domain.TrusteeCountV1,
+		}
+		if _, err := s.CreateTrusteeConsent(ctx, payload, candidateKeys[i], 5500); err != nil {
+			return fmt.Errorf("invite election trustee consent %s: %w", name, err)
+		}
+	}
+
+	finalTrustees, err := s.FinalTrusteeSet(ctx, invite.ElectionID)
+	if err != nil {
+		return fmt.Errorf("invite election final trustees: %w", err)
+	}
+	for i, name := range candidateNames {
+		if _, err := s.CreateTallyKeyContribution(ctx, invite.ElectionID, deterministicEd25519Pub(name), deterministicBytes(name+".tally-setup", 32), finalTrustees, candidateKeys[i], 8000); err != nil {
+			return fmt.Errorf("invite election tally key contribution %s: %w", name, err)
+		}
+	}
+	if _, err := s.BuildTallyKeySet(ctx, invite.ElectionID, reporterPub, reporterPriv); err != nil {
+		return fmt.Errorf("invite election tally key set: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) invitationStatuses(ctx context.Context, localPeerID string) ([]ElectionInvitationStatus, error) {
+	inviteRefs, err := s.ListServableObjectRefs(ctx, string(domain.ScopeNetwork), "", []string{string(domain.ObjectTypeElectionInvite)})
+	if err != nil {
+		return nil, fmt.Errorf("list election invites: %w", err)
+	}
+	acceptanceRefs, err := s.ListServableObjectRefs(ctx, string(domain.ScopeNetwork), "", []string{string(domain.ObjectTypeElectionAcceptance)})
+	if err != nil {
+		return nil, fmt.Errorf("list election acceptances: %w", err)
+	}
+	declineRefs, err := s.ListServableObjectRefs(ctx, string(domain.ScopeNetwork), "", []string{string(domain.ObjectTypeElectionDecline)})
+	if err != nil {
+		return nil, fmt.Errorf("list election declines: %w", err)
+	}
+	acceptedByElection := map[string]map[string]struct{}{}
+	for _, ref := range acceptanceRefs {
+		envelope, err := s.LoadObjectEnvelope(ctx, ref.ObjectID)
+		if err != nil {
+			return nil, err
+		}
+		decoded, err := domain.DecodePayload(domain.ObjectTypeElectionAcceptance, envelope.Payload)
+		if err != nil {
+			return nil, err
+		}
+		acceptance := decoded.(domain.ElectionAcceptancePayload)
+		peers := acceptedByElection[acceptance.ElectionID]
+		if peers == nil {
+			peers = map[string]struct{}{}
+			acceptedByElection[acceptance.ElectionID] = peers
+		}
+		peers[acceptance.VoterPeerID] = struct{}{}
+	}
+	declinedByElection := map[string]map[string]struct{}{}
+	for _, ref := range declineRefs {
+		envelope, err := s.LoadObjectEnvelope(ctx, ref.ObjectID)
+		if err != nil {
+			return nil, err
+		}
+		decoded, err := domain.DecodePayload(domain.ObjectTypeElectionDecline, envelope.Payload)
+		if err != nil {
+			return nil, err
+		}
+		decline := decoded.(domain.ElectionDeclinePayload)
+		peers := declinedByElection[decline.ElectionID]
+		if peers == nil {
+			peers = map[string]struct{}{}
+			declinedByElection[decline.ElectionID] = peers
+		}
+		peers[decline.VoterPeerID] = struct{}{}
+	}
+	var statuses []ElectionInvitationStatus
+	for _, ref := range inviteRefs {
+		envelope, err := s.LoadObjectEnvelope(ctx, ref.ObjectID)
+		if err != nil {
+			return nil, err
+		}
+		decoded, err := domain.DecodePayload(domain.ObjectTypeElectionInvite, envelope.Payload)
+		if err != nil {
+			return nil, err
+		}
+		invite := decoded.(domain.ElectionInvitePayload)
+		accepted := keysSorted(acceptedByElection[invite.ElectionID])
+		declined := keysSorted(declinedByElection[invite.ElectionID])
+		statuses = append(statuses, ElectionInvitationStatus{
+			ElectionID:      invite.ElectionID,
+			Title:           invite.Title,
+			Options:         append([]string(nil), invite.Options...),
+			CreatorPeerID:   invite.CreatorPeerID,
+			InvitedPeerIDs:  append([]string(nil), invite.InvitedPeerIDs...),
+			AcceptedPeerIDs: accepted,
+			DeclinedPeerIDs: declined,
+			LocalInvited:    localPeerID != "" && containsString(invite.InvitedPeerIDs, localPeerID),
+			LocalAccepted:   localPeerID != "" && containsString(accepted, localPeerID),
+			LocalDeclined:   localPeerID != "" && containsString(declined, localPeerID),
+			Finalized:       s.anonymousElectionExists(ctx, invite.ElectionID),
+		})
+	}
+	return statuses, nil
+}
+
+func (s *Service) inviteWithAcceptedVoters(ctx context.Context, electionID string) (domain.ElectionInvitePayload, []string, error) {
+	invite, status, found, err := s.store.ElectionInvitationByID(ctx, electionID)
+	if err != nil {
+		return domain.ElectionInvitePayload{}, nil, err
+	}
+	if !found || status != validation.StatusValid {
+		return domain.ElectionInvitePayload{}, nil, fmt.Errorf("valid election invite %s not found", electionID)
+	}
+	statuses, err := s.invitationStatuses(ctx, "")
+	if err != nil {
+		return domain.ElectionInvitePayload{}, nil, err
+	}
+	for _, candidate := range statuses {
+		if candidate.ElectionID == electionID {
+			return invite, candidate.AcceptedPeerIDs, nil
+		}
+	}
+	return invite, nil, nil
+}
+
+func (s *Service) anonymousElectionExists(ctx context.Context, electionID string) bool {
+	inputs, err := s.store.ElectionActivationInputs(ctx, electionID)
+	return err == nil && inputs.ElectionFound && inputs.ElectionStatus == validation.StatusValid
+}
+
+func pendingInvitations(invitations []ElectionInvitationStatus) []ElectionInvitationStatus {
+	var pending []ElectionInvitationStatus
+	for _, invitation := range invitations {
+		if invitation.LocalInvited && !invitation.LocalAccepted && !invitation.Finalized {
+			pending = append(pending, invitation)
+		}
+	}
+	return pending
+}
+
+func acceptedVotersForElection(invitations []ElectionInvitationStatus, electionID string) []string {
+	for _, invitation := range invitations {
+		if invitation.ElectionID == electionID {
+			return append([]string(nil), invitation.AcceptedPeerIDs...)
+		}
+	}
+	return nil
+}
+
+func frontendElectionID(title string, options []string, invited []string, creator string, createdAt int64) string {
+	digest := crypto.Hash(crypto.DomainObjectID, []byte("frontend-election"), []byte(title), []byte(strings.Join(options, "\x00")), []byte(strings.Join(invited, "\x00")), []byte(creator), []byte(fmt.Sprint(createdAt)))
+	return "election-" + digest.String()[:16]
+}
+
 func normalizeVoterIDs(voterIDs []string) []string {
 	seen := make(map[string]struct{}, len(voterIDs))
 	normalized := make([]string, 0, len(voterIDs))
@@ -966,6 +1451,45 @@ func deterministicBytes(seed string, size int) []byte {
 		size = len(h)
 	}
 	return h[:size]
+}
+
+func normalizeOptions(options []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(options))
+	for _, option := range options {
+		option = strings.TrimSpace(option)
+		if option == "" {
+			continue
+		}
+		if _, ok := seen[option]; ok {
+			continue
+		}
+		seen[option] = struct{}{}
+		out = append(out, option)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func keysSorted(m map[string]struct{}) []string {
+	if m == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func containsString(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) sign(signDomain crypto.Domain, objectType domain.ObjectType, scope domain.Scope, scopeID string, createdAt int64, unsignedPayload []byte, privKey ed25519.PrivateKey) ([]byte, error) {

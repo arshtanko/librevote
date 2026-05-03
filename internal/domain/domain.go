@@ -7,6 +7,9 @@ type ObjectType string
 
 const (
 	ObjectTypeTrusteeSelectionElection ObjectType = "TrusteeSelectionElection"
+	ObjectTypeElectionInvite           ObjectType = "ElectionInvite"
+	ObjectTypeElectionAcceptance       ObjectType = "ElectionAcceptance"
+	ObjectTypeElectionDecline          ObjectType = "ElectionDecline"
 	ObjectTypeTrusteeNomination        ObjectType = "TrusteeNomination"
 	ObjectTypeTrusteeVote              ObjectType = "TrusteeVote"
 	ObjectTypeTrusteeSelectionResult   ObjectType = "TrusteeSelectionResult"
@@ -44,6 +47,9 @@ const (
 
 var objectTypeScopes = map[ObjectType]Scope{
 	ObjectTypeTrusteeSelectionElection: ScopeNetwork,
+	ObjectTypeElectionInvite:           ScopeNetwork,
+	ObjectTypeElectionAcceptance:       ScopeNetwork,
+	ObjectTypeElectionDecline:          ScopeNetwork,
 	ObjectTypeTrusteeNomination:        ScopeTrusteeSelectionID,
 	ObjectTypeTrusteeVote:              ScopeTrusteeSelectionID,
 	ObjectTypeTrusteeSelectionResult:   ScopeTrusteeSelectionID,

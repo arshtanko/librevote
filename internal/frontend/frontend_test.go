@@ -233,9 +233,9 @@ func TestElectionStatusBeforeStart(t *testing.T) {
 	ts := httptest.NewServer(NewServer(&fakeController{peerID: "peer-local"}, svc).Handler())
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/api/election/status")
+	resp, err := http.Get(ts.URL + "/api/elections/status")
 	if err != nil {
-		t.Fatalf("GET election status: %v", err)
+		t.Fatalf("GET elections status: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -245,62 +245,104 @@ func TestElectionStatusBeforeStart(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode election status: %v", err)
 	}
-	if body.Available || body.TallyKeySetAvailable || body.Message == "" {
+	if body.Available || body.TallyKeySetAvailable {
 		t.Fatalf("unexpected status before start: %+v", body)
-	}
-	if body.LocalVoterID != "" {
-		t.Fatalf("local voter id = %q, want empty before election", body.LocalVoterID)
 	}
 }
 
-func TestElectionStartAndStatus(t *testing.T) {
+func TestCreateElectionInviteAndAcceptAndFinalize(t *testing.T) {
 	svc, err := app.Open(t.TempDir(), "frontend-test")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer svc.Close()
-	fc := &fakeController{peerID: "peer-local", connectedIDs: []string{"peer-2", "peer-1", "peer-2"}}
+	fc := &fakeController{peerID: "peer-local", connectedIDs: []string{"peer-2", "peer-1"}}
 	ts := httptest.NewServer(NewServer(fc, svc).Handler())
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/api/election/start", "application/json", nil)
+	body := `{"title":"Test Election","options":["yes","no"],"invited_peer_ids":[],"include_self":true}`
+	resp, err := http.Post(ts.URL+"/api/elections/invite", "application/json", strings.NewReader(body))
 	if err != nil {
-		t.Fatalf("POST election start: %v", err)
+		t.Fatalf("POST election invite: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	var started app.ElectionStatus
-	if err := json.NewDecoder(resp.Body).Decode(&started); err != nil {
-		t.Fatalf("decode start: %v", err)
+	var inviteStatus app.ElectionStatus
+	if err := json.NewDecoder(resp.Body).Decode(&inviteStatus); err != nil {
+		t.Fatalf("decode invite: %v", err)
 	}
-	if !started.Available || !started.TallyKeySetAvailable || started.ElectionID == "" || len(started.Options) == 0 {
-		t.Fatalf("unexpected started status: %+v", started)
+	if len(inviteStatus.Invitations) != 1 {
+		t.Fatalf("invitations = %d, want 1", len(inviteStatus.Invitations))
 	}
-	wantVoters := []string{"peer-1", "peer-2", "peer-local"}
-	if strings.Join(started.EligibleVoterIDs, ",") != strings.Join(wantVoters, ",") {
-		t.Fatalf("eligible voters = %v, want %v", started.EligibleVoterIDs, wantVoters)
-	}
-	if started.LocalVoterID != "peer-local" || !started.LocalVoterSignable || started.LocalVoterVoted {
-		t.Fatalf("started status missing local voter fields: %+v", started)
+	invite := inviteStatus.Invitations[0]
+	if !invite.LocalAccepted {
+		t.Fatalf("expected local to be auto-accepted since include_self was true")
 	}
 
-	resp2, err := http.Get(ts.URL + "/api/election/status")
+	finalizeBody := `{"election_id":"` + invite.ElectionID + `"}`
+	resp3, err := http.Post(ts.URL+"/api/elections/finalize", "application/json", strings.NewReader(finalizeBody))
 	if err != nil {
-		t.Fatalf("GET election status: %v", err)
+		t.Fatalf("POST election finalize: %v", err)
 	}
-	defer resp2.Body.Close()
-	var status app.ElectionStatus
-	if err := json.NewDecoder(resp2.Body).Decode(&status); err != nil {
-		t.Fatalf("decode status: %v", err)
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("finalize status = %d, want 200", resp3.StatusCode)
 	}
-	if status.ElectionID != started.ElectionID || !status.TallyKeySetAvailable {
-		t.Fatalf("status after start = %+v, started %+v", status, started)
+	var finalized app.ElectionStatus
+	if err := json.NewDecoder(resp3.Body).Decode(&finalized); err != nil {
+		t.Fatalf("decode finalized: %v", err)
+	}
+	if !finalized.Available {
+		t.Fatalf("expected election to be available after finalize")
 	}
 }
 
-func TestVoteCastUnavailableBeforeStart(t *testing.T) {
+func TestFinalizeBlockedWhenNotAllInvitedResponded(t *testing.T) {
+	svc, err := app.Open(t.TempDir(), "frontend-test")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer svc.Close()
+	fc := &fakeController{peerID: "peer-local", connectedIDs: []string{"peer-2"}}
+	ts := httptest.NewServer(NewServer(fc, svc).Handler())
+	defer ts.Close()
+
+	body := `{"title":"Test Election","options":["yes","no"],"invited_peer_ids":["peer-2"],"include_self":true}`
+	resp, err := http.Post(ts.URL+"/api/elections/invite", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST election invite: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("invite status = %d, want 200", resp.StatusCode)
+	}
+	var inviteStatus app.ElectionStatus
+	if err := json.NewDecoder(resp.Body).Decode(&inviteStatus); err != nil {
+		t.Fatalf("decode invite: %v", err)
+	}
+	invite := inviteStatus.Invitations[0]
+
+	finalizeBody := `{"election_id":"` + invite.ElectionID + `"}`
+	finalizeResp, err := http.Post(ts.URL+"/api/elections/finalize", "application/json", strings.NewReader(finalizeBody))
+	if err != nil {
+		t.Fatalf("POST election finalize: %v", err)
+	}
+	defer finalizeResp.Body.Close()
+	if finalizeResp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("finalize status = %d, want 500", finalizeResp.StatusCode)
+	}
+	var errBody errorResponse
+	if err := json.NewDecoder(finalizeResp.Body).Decode(&errBody); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if !strings.Contains(errBody.Error, "all invited peers have responded") {
+		t.Fatalf("error = %q, want containing 'all invited peers have responded'", errBody.Error)
+	}
+}
+
+func TestVoteCastBlockedBeforeFinalize(t *testing.T) {
 	svc, err := app.Open(t.TempDir(), "frontend-test")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -314,13 +356,6 @@ func TestVoteCastUnavailableBeforeStart(t *testing.T) {
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", resp.StatusCode)
 	}
-	var body errorResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("decode error: %v", err)
-	}
-	if !strings.Contains(body.Error, "election is not available locally") {
-		t.Fatalf("error = %q", body.Error)
-	}
 }
 
 func TestVoteCastWithoutLocalPeerIDFails(t *testing.T) {
@@ -329,8 +364,18 @@ func TestVoteCastWithoutLocalPeerIDFails(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer svc.Close()
-	if _, err := svc.StartMVPElectionForVoters(context.Background(), []string{"peer-other"}); err != nil {
-		t.Fatalf("StartMVPElectionForVoters() error = %v", err)
+	inv, err := svc.CreateElectionInvite(context.Background(), app.CreateElectionInviteInput{
+		Title: "Test", Options: []string{"yes", "no"}, InvitedPeerIDs: []string{"peer-other"}, CreatorPeerID: "peer-creator",
+	})
+	if err != nil {
+		t.Fatalf("CreateElectionInvite() error = %v", err)
+	}
+	inv2, err := svc.AcceptElectionInvite(context.Background(), inv.Invitations[0].ElectionID, "peer-other")
+	if err != nil {
+		t.Fatalf("AcceptElectionInvite() error = %v", err)
+	}
+	if _, err := svc.FinalizeElectionInvite(context.Background(), inv2.Invitations[0].ElectionID, "peer-creator"); err != nil {
+		t.Fatalf("FinalizeElectionInvite() error = %v", err)
 	}
 	ts := httptest.NewServer(NewServer(&fakeController{}, svc).Handler())
 	defer ts.Close()
@@ -349,7 +394,7 @@ func TestVoteCastWithoutLocalPeerIDFails(t *testing.T) {
 	}
 }
 
-func TestVoteCastSuccessfulAfterStart(t *testing.T) {
+func TestVoteCastSuccessfulAfterFinalize(t *testing.T) {
 	svc, err := app.Open(t.TempDir(), "frontend-test")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -357,7 +402,37 @@ func TestVoteCastSuccessfulAfterStart(t *testing.T) {
 	defer svc.Close()
 	ts := httptest.NewServer(NewServer(&fakeController{peerID: "peer-local"}, svc).Handler())
 	defer ts.Close()
-	postElectionStart(t, ts.URL)
+
+	inviteBody := `{"title":"Test","options":["yes","no"],"invited_peer_ids":[],"include_self":true}`
+	inviteResp, err := http.Post(ts.URL+"/api/elections/invite", "application/json", strings.NewReader(inviteBody))
+	if err != nil {
+		t.Fatalf("POST election invite: %v", err)
+	}
+	if inviteResp.StatusCode != http.StatusOK {
+		inviteResp.Body.Close()
+		t.Fatalf("invite status = %d, want 200", inviteResp.StatusCode)
+	}
+	var inviteStatus app.ElectionStatus
+	if err := json.NewDecoder(inviteResp.Body).Decode(&inviteStatus); err != nil {
+		inviteResp.Body.Close()
+		t.Fatalf("decode invite: %v", err)
+	}
+	inviteResp.Body.Close()
+	if len(inviteStatus.Invitations) == 0 || inviteStatus.Invitations[0].ElectionID == "" {
+		t.Fatalf("invitation election ID is empty: %+v", inviteStatus)
+	}
+	electionID := inviteStatus.Invitations[0].ElectionID
+
+	finalizeBody := `{"election_id":"` + electionID + `"}`
+	finalizeResp, err := http.Post(ts.URL+"/api/elections/finalize", "application/json", strings.NewReader(finalizeBody))
+	if err != nil {
+		t.Fatalf("POST election finalize: %v", err)
+	}
+	if finalizeResp.StatusCode != http.StatusOK {
+		finalizeResp.Body.Close()
+		t.Fatalf("finalize status = %d, want 200", finalizeResp.StatusCode)
+	}
+	finalizeResp.Body.Close()
 
 	resp := postVoteCast(t, ts.URL, `{"choice":"yes"}`)
 	defer resp.Body.Close()
@@ -372,9 +447,9 @@ func TestVoteCastSuccessfulAfterStart(t *testing.T) {
 		t.Fatalf("unexpected vote response: %+v", body)
 	}
 
-	statusResp, err := http.Get(ts.URL + "/api/election/status")
+	statusResp, err := http.Get(ts.URL + "/api/elections/status")
 	if err != nil {
-		t.Fatalf("GET election status: %v", err)
+		t.Fatalf("GET elections status: %v", err)
 	}
 	defer statusResp.Body.Close()
 	var status app.ElectionStatus
@@ -382,7 +457,7 @@ func TestVoteCastSuccessfulAfterStart(t *testing.T) {
 		t.Fatalf("decode status: %v", err)
 	}
 	if status.BallotsSeen != 1 || status.ValidBallotCount != 1 || !status.LocalVoterVoted {
-		t.Fatalf("status counts = seen %d valid %d, want 1/1", status.BallotsSeen, status.ValidBallotCount)
+		t.Fatalf("status counts = seen %d valid %d local_voted=%v, want 1/1 and true", status.BallotsSeen, status.ValidBallotCount, status.LocalVoterVoted)
 	}
 }
 
@@ -394,7 +469,33 @@ func TestVoteCastMismatchedVoterAndInvalidChoice(t *testing.T) {
 	defer svc.Close()
 	ts := httptest.NewServer(NewServer(&fakeController{peerID: "peer-local"}, svc).Handler())
 	defer ts.Close()
-	postElectionStart(t, ts.URL)
+
+	inviteBody := `{"title":"Test","options":["yes","no"],"invited_peer_ids":[],"include_self":true}`
+	inviteResp, err := http.Post(ts.URL+"/api/elections/invite", "application/json", strings.NewReader(inviteBody))
+	if err != nil {
+		t.Fatalf("POST election invite: %v", err)
+	}
+	if inviteResp.StatusCode != http.StatusOK {
+		inviteResp.Body.Close()
+		t.Fatalf("invite status = %d, want 200", inviteResp.StatusCode)
+	}
+	var inviteStatus app.ElectionStatus
+	if err := json.NewDecoder(inviteResp.Body).Decode(&inviteStatus); err != nil {
+		inviteResp.Body.Close()
+		t.Fatalf("decode invite: %v", err)
+	}
+	inviteResp.Body.Close()
+	if len(inviteStatus.Invitations) == 0 || inviteStatus.Invitations[0].ElectionID == "" {
+		t.Fatalf("invitation election ID is empty")
+	}
+	electionID := inviteStatus.Invitations[0].ElectionID
+
+	finalizeBody := `{"election_id":"` + electionID + `"}`
+	finalizeResp, err := http.Post(ts.URL+"/api/elections/finalize", "application/json", strings.NewReader(finalizeBody))
+	if err != nil {
+		t.Fatalf("POST election finalize: %v", err)
+	}
+	finalizeResp.Body.Close()
 
 	for _, tt := range []struct {
 		name string
@@ -429,7 +530,33 @@ func TestVoteCastDuplicateIsIdempotent(t *testing.T) {
 	defer svc.Close()
 	ts := httptest.NewServer(NewServer(&fakeController{peerID: "peer-local"}, svc).Handler())
 	defer ts.Close()
-	postElectionStart(t, ts.URL)
+
+	inviteBody := `{"title":"Test","options":["yes","no"],"invited_peer_ids":[],"include_self":true}`
+	inviteResp, err := http.Post(ts.URL+"/api/elections/invite", "application/json", strings.NewReader(inviteBody))
+	if err != nil {
+		t.Fatalf("POST election invite: %v", err)
+	}
+	if inviteResp.StatusCode != http.StatusOK {
+		inviteResp.Body.Close()
+		t.Fatalf("invite status = %d, want 200", inviteResp.StatusCode)
+	}
+	var inviteStatus app.ElectionStatus
+	if err := json.NewDecoder(inviteResp.Body).Decode(&inviteStatus); err != nil {
+		inviteResp.Body.Close()
+		t.Fatalf("decode invite: %v", err)
+	}
+	inviteResp.Body.Close()
+	if len(inviteStatus.Invitations) == 0 || inviteStatus.Invitations[0].ElectionID == "" {
+		t.Fatalf("invitation election ID is empty")
+	}
+	electionID := inviteStatus.Invitations[0].ElectionID
+
+	finalizeBody := `{"election_id":"` + electionID + `"}`
+	finalizeResp, err := http.Post(ts.URL+"/api/elections/finalize", "application/json", strings.NewReader(finalizeBody))
+	if err != nil {
+		t.Fatalf("POST election finalize: %v", err)
+	}
+	finalizeResp.Body.Close()
 
 	firstResp := postVoteCast(t, ts.URL, `{"choice":"yes"}`)
 	defer firstResp.Body.Close()
@@ -450,9 +577,9 @@ func TestVoteCastDuplicateIsIdempotent(t *testing.T) {
 		t.Fatalf("duplicate response = %+v, first %+v", second, first)
 	}
 
-	statusResp, err := http.Get(ts.URL + "/api/election/status")
+	statusResp, err := http.Get(ts.URL + "/api/elections/status")
 	if err != nil {
-		t.Fatalf("GET election status: %v", err)
+		t.Fatalf("GET elections status: %v", err)
 	}
 	defer statusResp.Body.Close()
 	var status app.ElectionStatus
@@ -464,7 +591,7 @@ func TestVoteCastDuplicateIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestElectionStartIsIdempotent(t *testing.T) {
+func TestInviteAndFinalizeAreIdempotent(t *testing.T) {
 	svc, err := app.Open(t.TempDir(), "frontend-test")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -473,54 +600,89 @@ func TestElectionStartIsIdempotent(t *testing.T) {
 	ts := httptest.NewServer(NewServer(&fakeController{peerID: "peer-local"}, svc).Handler())
 	defer ts.Close()
 
-	first := postElectionStart(t, ts.URL)
-	second := postElectionStart(t, ts.URL)
-	if first.ElectionID != second.ElectionID || first.Title != second.Title || first.BallotsSeen != second.BallotsSeen {
-		t.Fatalf("start not idempotent: first=%+v second=%+v", first, second)
+	inviteBody := `{"title":"Test","options":["yes","no"],"invited_peer_ids":[],"include_self":true}`
+	firstInvite, err := http.Post(ts.URL+"/api/elections/invite", "application/json", strings.NewReader(inviteBody))
+	if err != nil {
+		t.Fatalf("POST first election invite: %v", err)
+	}
+	if firstInvite.StatusCode != http.StatusOK {
+		firstInvite.Body.Close()
+		t.Fatalf("first invite status = %d, want 200", firstInvite.StatusCode)
+	}
+	var firstStatus app.ElectionStatus
+	if err := json.NewDecoder(firstInvite.Body).Decode(&firstStatus); err != nil {
+		firstInvite.Body.Close()
+		t.Fatalf("decode first invite: %v", err)
+	}
+	firstInvite.Body.Close()
+	if len(firstStatus.Invitations) == 0 || firstStatus.Invitations[0].ElectionID == "" {
+		t.Fatalf("first invitation election ID is empty")
+	}
+	firstElectionID := firstStatus.Invitations[0].ElectionID
+
+	secondInvite, err := http.Post(ts.URL+"/api/elections/invite", "application/json", strings.NewReader(inviteBody))
+	if err != nil {
+		t.Fatalf("POST second election invite: %v", err)
+	}
+	if secondInvite.StatusCode != http.StatusOK {
+		secondInvite.Body.Close()
+		t.Fatalf("second invite status = %d, want 200", secondInvite.StatusCode)
+	}
+	var secondStatus app.ElectionStatus
+	if err := json.NewDecoder(secondInvite.Body).Decode(&secondStatus); err != nil {
+		secondInvite.Body.Close()
+		t.Fatalf("decode second invite: %v", err)
+	}
+	secondInvite.Body.Close()
+	if len(secondStatus.Invitations) == 0 || secondStatus.Invitations[0].ElectionID == "" {
+		t.Fatalf("second invitation election ID is empty")
+	}
+	secondElectionID := secondStatus.Invitations[0].ElectionID
+	if firstElectionID != secondElectionID {
+		t.Fatalf("invite not idempotent: first=%q second=%q", firstElectionID, secondElectionID)
+	}
+
+	finalizeBody := `{"election_id":"` + firstElectionID + `"}`
+	finalizeResp, err := http.Post(ts.URL+"/api/elections/finalize", "application/json", strings.NewReader(finalizeBody))
+	if err != nil {
+		t.Fatalf("POST election finalize: %v", err)
+	}
+	defer finalizeResp.Body.Close()
+	if finalizeResp.StatusCode != http.StatusOK {
+		t.Fatalf("finalize status = %d, want 200", finalizeResp.StatusCode)
+	}
+
+	finalizeAgain, err := http.Post(ts.URL+"/api/elections/finalize", "application/json", strings.NewReader(finalizeBody))
+	if err != nil {
+		t.Fatalf("POST election finalize again: %v", err)
+	}
+	defer finalizeAgain.Body.Close()
+	if finalizeAgain.StatusCode != http.StatusOK {
+		t.Fatalf("finalize again status = %d, want 200", finalizeAgain.StatusCode)
 	}
 }
 
-func TestVoteCastFailsWhenLocalPeerNotInElectionAllowlist(t *testing.T) {
+func TestVoteCastBlockedWhenPeerNotInvited(t *testing.T) {
 	svc, err := app.Open(t.TempDir(), "frontend-test")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer svc.Close()
-	if _, err := svc.StartMVPElectionForVoters(context.Background(), []string{"peer-other"}); err != nil {
-		t.Fatalf("StartMVPElectionForVoters() error = %v", err)
-	}
 	ts := httptest.NewServer(NewServer(&fakeController{peerID: "peer-local"}, svc).Handler())
 	defer ts.Close()
+
+	inviteBody := `{"title":"Test","options":["yes","no"],"invited_peer_ids":["peer-other"],"include_self":false}`
+	inviteResp, err := http.Post(ts.URL+"/api/elections/invite", "application/json", strings.NewReader(inviteBody))
+	if err != nil {
+		t.Fatalf("POST election invite: %v", err)
+	}
+	inviteResp.Body.Close()
 
 	resp := postVoteCast(t, ts.URL, `{"choice":"yes"}`)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (election unavailable to non-invited peer)", resp.StatusCode)
 	}
-	var body errorResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("decode error: %v", err)
-	}
-	if !strings.Contains(body.Error, "voter is not eligible") {
-		t.Fatalf("error = %q", body.Error)
-	}
-}
-
-func postElectionStart(t *testing.T, baseURL string) app.ElectionStatus {
-	t.Helper()
-	resp, err := http.Post(baseURL+"/api/election/start", "application/json", nil)
-	if err != nil {
-		t.Fatalf("POST election start: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-	var body app.ElectionStatus
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("decode start: %v", err)
-	}
-	return body
 }
 
 func postVoteCast(t *testing.T, baseURL string, body string) *http.Response {

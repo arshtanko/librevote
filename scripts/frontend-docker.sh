@@ -9,6 +9,11 @@ NAME_PREFIX="librevote-frontend"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+for i in $(seq 1 "$COUNT"); do
+  docker rm -f "$NAME_PREFIX-$i" >/dev/null 2>&1 || true
+  docker volume rm "$NAME_PREFIX-$i-data" >/dev/null 2>&1 || true
+done
+
 docker build -t "$IMAGE" -f - "$PROJECT_DIR" <<'DOCKERFILE'
 FROM golang:1.23 AS build
 WORKDIR /src
@@ -23,10 +28,6 @@ ENTRYPOINT ["/librevote"]
 DOCKERFILE
 
 docker network inspect "$NETWORK" >/dev/null 2>&1 || docker network create "$NETWORK" >/dev/null
-
-for i in $(seq 1 "$COUNT"); do
-  docker rm -f "$NAME_PREFIX-$i" >/dev/null 2>&1 || true
-done
 
 for i in $(seq 1 "$COUNT"); do
   http_port=$((18080 + i - 1))
