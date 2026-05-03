@@ -190,3 +190,64 @@ Completion criteria:
 - A presenter can start the full demo with Docker and use the browser UI without manual CLI steps.
 - The demo still exercises real node storage, validation and P2P synchronization paths.
 - The simplified APIs remain narrow and can be removed or replaced after the course-project demo.
+
+## Stage 11. Node Frontend Rebuild
+
+Goal: rebuild the browser frontend as a real node UI, not a scripted demo. The browser controls one running LibreVote node. The node joins the P2P mesh, syncs objects, starts elections, casts votes and computes results through existing storage, validation and networking paths.
+
+Step 1. Reset frontend scope:
+
+- Start from the pre-frontend implementation state before the Docker demo frontend code.
+- Keep the existing backend object model, storage, validation, CLI, libp2p discovery, GossipSub announcements and direct sync implementation.
+- Remove frontend assumptions such as fixed Docker roles, fixed voter counts, pre-connected peers and pre-voted demo flows.
+
+Step 2. Define the frontend boundary:
+
+- Add a user-facing `frontend serve` node command.
+- The frontend must call local node HTTP APIs only; the browser does not join P2P directly.
+- The running node handles libp2p connections, discovery, object sync, storage and validation.
+
+Step 3. Build the network screen:
+
+- Show local peer ID, active connected peer count and local shareable bootstrap multiaddrs.
+- Accept one or more full bootstrap multiaddrs that include `/p2p/<peer_id>`.
+- Connect the local node to the submitted bootstrap peers and report exact success, warning or failure state.
+- Label known sync peers honestly; do not call stale cached peers active or discovered.
+
+Step 4. Fix mesh discovery and catch-up:
+
+- After connecting to one bootstrap peer, trigger one immediate peer discovery pass.
+- Resolve HTTP sync URLs for reachable peers without treating peer metadata as domain authority.
+- Run object catch-up sync through existing inventory/fetch/ingest paths.
+- Continue periodic discovery, announcements and direct fetch after the initial join.
+
+Step 5. Build the election screen:
+
+- Show local election state from synced storage: no election, election available, tally key set available, ballots seen and result available.
+- `Start Election` creates the MVP election objects on the local node only.
+- Other nodes learn the election by P2P sync after joining the mesh.
+
+Step 6. Build the voting screen:
+
+- Do not bind voters to nodes.
+- Let the user select or enter a voter identity from the local election allowlist when available.
+- Let the user select a choice from the local election options.
+- Cast votes through the node service and show clear errors when the election is not synced or the voter is not eligible.
+
+Step 7. Build the results screen:
+
+- Show locally computed votes seen, valid ballots, conflicted ballots and option counts.
+- Provide a `Compute Local Result` action for the MVP tally result object.
+- Results must come from local synced state, not browser state.
+
+Step 8. Rework Docker startup:
+
+- Start independent node frontends by default, with no automatic peer connections and no automatic votes.
+- Print each node frontend URL and each node bootstrap multiaddr.
+- Keep any autorun mode explicit and separate from the default manual internet-style workflow.
+
+Step 9. Add verification:
+
+- Add HTTP API tests for network status, connect, election state, vote and result endpoints.
+- Add node integration tests for joining through one bootstrap peer, syncing an election, propagating a vote and showing a result.
+- Keep smoke scripts focused on starting a node frontend and verifying the API surface without faking P2P state.

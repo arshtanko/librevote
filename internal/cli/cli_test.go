@@ -141,10 +141,57 @@ func assertUsage(t *testing.T, out string) {
 		"librevote node serve",
 		"librevote node discover",
 		"librevote node start",
+		"librevote frontend serve",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout missing %q in:\n%s", want, out)
 		}
+	}
+}
+
+func TestFrontendMissingSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"frontend"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run() exit code = %d; want 2", code)
+	}
+	if got, want := stderr.String(), "error: frontend requires a subcommand: serve\n"; got != want {
+		t.Fatalf("stderr = %q; want %q", got, want)
+	}
+}
+
+func TestFrontendUnknownSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"frontend", "unknown"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run() exit code = %d; want 2", code)
+	}
+	if got, want := stderr.String(), "error: unknown frontend subcommand \"unknown\"\n"; got != want {
+		t.Fatalf("stderr = %q; want %q", got, want)
+	}
+}
+
+func TestFrontendServeParsing(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing db", args: []string{"frontend", "serve"}, want: "error: --db is required\n"},
+		{name: "unknown flag", args: []string{"frontend", "serve", "--unknown", "x"}, want: "error: unknown flag --unknown\n"},
+		{name: "invalid mode", args: []string{"frontend", "serve", "--db", t.TempDir(), "--network", "testnet", "--mode", "bad"}, want: "error: invalid --mode \"bad\" (valid: auto, server, client)\n"},
+		{name: "bad interval", args: []string{"frontend", "serve", "--db", t.TempDir(), "--network", "testnet", "--announce-interval", "0s"}, want: "error: --announce-interval must be positive\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Run(tt.args, &stdout, &stderr)
+			if code != 2 {
+				t.Fatalf("Run() exit code = %d; want 2", code)
+			}
+			if got := stderr.String(); got != tt.want {
+				t.Fatalf("stderr = %q; want %q", got, tt.want)
+			}
+		})
 	}
 }
 

@@ -14,7 +14,9 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"librevote/internal/discovery"
+	"librevote/internal/domain"
 	"librevote/internal/gossip"
+	"librevote/internal/storage"
 	librevotesync "librevote/internal/sync"
 	"librevote/internal/transport"
 )
@@ -33,6 +35,7 @@ type NodeStartConfig struct {
 	Mode             string
 	AdvertisedHTTP   string
 	AnnounceInterval time.Duration
+	ExtraHTTPHandler nethttp.Handler
 }
 
 // NodeStart runs an integrated node with HTTP object server, libp2p/Kademlia
@@ -51,6 +54,7 @@ type NodeStart struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	logf      func(format string, args ...interface{})
+	extraHTTP nethttp.Handler
 }
 
 // NewNodeStart creates an unstarted integrated node. The caller must call
@@ -96,6 +100,7 @@ func NewNodeStart(ctx context.Context, config NodeStartConfig, logf func(string,
 		ctx:       nsCtx,
 		cancel:    cancel,
 		logf:      logf,
+		extraHTTP: config.ExtraHTTPHandler,
 	}
 
 	return ns, nil
@@ -127,7 +132,7 @@ func (ns *NodeStart) Start(ctx context.Context) error {
 
 	server := transport.NewServer(ns.svc, ns.config.NetworkID)
 	ns.httpSrv = &nethttp.Server{
-		Handler: server.Handler(),
+		Handler: ns.combinedHTTPHandler(server.Handler()),
 	}
 
 	ns.logf("http server listening on %s", ns.httpAddr)
@@ -231,6 +236,25 @@ func (ns *NodeStart) Discovery() *discovery.Discovery {
 	return ns.discovery
 }
 
+// SetExtraHTTPHandler installs non-sync HTTP routes before Start is called.
+// Direct sync endpoints remain served by the built-in transport handler.
+func (ns *NodeStart) SetExtraHTTPHandler(handler nethttp.Handler) {
+	ns.extraHTTP = handler
+}
+
+func (ns *NodeStart) combinedHTTPHandler(syncHandler nethttp.Handler) nethttp.Handler {
+	if ns.extraHTTP == nil {
+		return syncHandler
+	}
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		if r.URL.Path == "/inventory" || strings.HasPrefix(r.URL.Path, "/object/") {
+			syncHandler.ServeHTTP(w, r)
+			return
+		}
+		ns.extraHTTP.ServeHTTP(w, r)
+	})
+}
+
 // Addr returns the actual HTTP listen address (e.g. "127.0.0.1:45678").
 // When configured with port 0, the real port is resolved from the listener.
 func (ns *NodeStart) Addr() string {
@@ -241,6 +265,43 @@ func (ns *NodeStart) Addr() string {
 		return ns.httpSrv.Addr
 	}
 	return ""
+}
+
+// PeerID returns the local libp2p peer ID when discovery is running.
+func (ns *NodeStart) PeerID() string {
+	if ns.discovery == nil {
+		return ""
+	}
+	return ns.discovery.Identity().PeerID.String()
+}
+
+// ListenMultiaddrs returns full libp2p bootstrap multiaddrs for this node.
+func (ns *NodeStart) ListenMultiaddrs() []string {
+	if ns.discovery == nil {
+		return nil
+	}
+	peerID := ns.discovery.Identity().PeerID
+	addrs := ns.discovery.Host().Addrs()
+	result := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		result = append(result, fmt.Sprintf("%s/p2p/%s", a, peerID))
+	}
+	return result
+}
+
+// ConnectedPeerCount returns the current libp2p connected peer count.
+func (ns *NodeStart) ConnectedPeerCount() int {
+	if ns.discovery == nil {
+		return 0
+	}
+	return len(ns.discovery.Host().Network().Peers())
+}
+
+// BootstrapPeers returns configured bootstrap multiaddrs.
+func (ns *NodeStart) BootstrapPeers() []string {
+	peers := make([]string, len(ns.config.BootstrapPeers))
+	copy(peers, ns.config.BootstrapPeers)
+	return peers
 }
 
 // InjectPeerHTTP sets an explicit HTTP URL for a peer ID, useful for tests.
@@ -264,6 +325,67 @@ func (ns *NodeStart) ConnectPeer(ctx context.Context, multiaddrStr string) error
 		return fmt.Errorf("parse peer addr: %w", err)
 	}
 	return ns.discovery.Host().Connect(ctx, *info)
+}
+
+// RefreshPeers runs one best-effort discovery, inventory publish, and HTTP catch-up pass.
+func (ns *NodeStart) RefreshPeers(ctx context.Context) ([]string, error) {
+	var warnings []string
+	if ns.discovery != nil {
+		discoverCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		peers, err := ns.discovery.DiscoverPeers(discoverCtx)
+		cancel()
+		if err != nil {
+			warnings = append(warnings, "discovery: "+err.Error())
+		}
+		ns.mu.Lock()
+		for _, p := range peers {
+			if p.HTTPURL != "" {
+				ns.peerHTTP[p.PeerID] = p.HTTPURL
+			}
+		}
+		ns.mu.Unlock()
+	}
+
+	if ns.gossipSvc != nil {
+		if err := ns.PublishInventory(ctx); err != nil {
+			warnings = append(warnings, "publish inventory: "+err.Error())
+		}
+	}
+
+	if ns.svc == nil {
+		return warnings, nil
+	}
+	ns.mu.Lock()
+	peerURLs := make([]string, 0, len(ns.peerHTTP))
+	for _, u := range ns.peerHTTP {
+		if u != "" {
+			peerURLs = append(peerURLs, u)
+		}
+	}
+	ns.mu.Unlock()
+	if len(peerURLs) == 0 {
+		return warnings, nil
+	}
+
+	scopes, err := ns.svc.ListServableScopes(ctx)
+	if err != nil {
+		warnings = append(warnings, "list local sync scopes: "+err.Error())
+		return warnings, nil
+	}
+	if len(scopes) == 0 {
+		scopes = append(scopes, storage.ScopePair{Scope: string(domain.ScopeNetwork)})
+	}
+	for _, sp := range scopes {
+		result, err := librevotesync.Sync(ctx, ns.transport, ns.svc, ns.svc, sp.Scope, sp.ScopeID, nil, peerURLs)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("catch up scope=%s scope_id=%q: %v", sp.Scope, sp.ScopeID, err))
+			continue
+		}
+		if len(result.Errors) > 0 {
+			warnings = append(warnings, fmt.Sprintf("catch up scope=%s scope_id=%q: %s", sp.Scope, sp.ScopeID, strings.Join(result.Errors, "; ")))
+		}
+	}
+	return warnings, nil
 }
 
 // PublishInventory publishes announcements for all local servable objects.

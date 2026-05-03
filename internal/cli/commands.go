@@ -16,6 +16,7 @@ import (
 	"librevote/internal/app"
 	"librevote/internal/discovery"
 	"librevote/internal/domain"
+	"librevote/internal/frontend"
 	"librevote/internal/sync"
 	"librevote/internal/transport"
 	"librevote/internal/validation"
@@ -1313,6 +1314,157 @@ func cmdNodeStart(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func cmdFrontend(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "error: frontend requires a subcommand: serve")
+		return 2
+	}
+	switch args[0] {
+	case "serve":
+		return cmdFrontendServe(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "error: unknown frontend subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func cmdFrontendServe(args []string, stdout, stderr io.Writer) int {
+	flags, err := parseFlags(args, frontendServeKnownFlags)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+	config, announceInterval, err := nodeStartConfigFromFlags(flags)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logf := func(format string, args ...interface{}) {
+		fmt.Fprintf(stdout, format+"\n", args...)
+	}
+
+	ns, err := app.NewNodeStart(ctx, config, logf)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: create frontend node: %v\n", err)
+		return 1
+	}
+	ns.SetExtraHTTPHandler(frontend.NewServer(ns).Handler())
+
+	if err := ns.Start(ctx); err != nil {
+		ns.Stop()
+		fmt.Fprintf(stderr, "error: start frontend node: %v\n", err)
+		return 6
+	}
+
+	fmt.Fprintf(stdout, "frontend node started (network: %s)\n", config.NetworkID)
+	fmt.Fprintf(stdout, "  frontend: http://%s\n", ns.Addr())
+	fmt.Fprintf(stdout, "  http: %s\n", ns.Addr())
+	if ns.Discovery() != nil {
+		fmt.Fprintf(stdout, "  peer_id: %s\n", ns.Discovery().Identity().PeerID)
+		fmt.Fprintf(stdout, "  namespace: %s\n", ns.Discovery().Namespace())
+		fmt.Fprintf(stdout, "  mode: %s\n", ns.Discovery().Config().Mode)
+		for _, a := range ns.Discovery().Host().Addrs() {
+			fmt.Fprintf(stdout, "  listen: %s/p2p/%s\n", a, ns.Discovery().Identity().PeerID)
+		}
+	}
+	fmt.Fprintf(stdout, "  network: %s\n", config.NetworkID)
+	fmt.Fprintf(stdout, "  announce_interval: %s\n", announceInterval)
+
+	if runErr := ns.Run(); runErr != nil {
+		fmt.Fprintf(stderr, "error: frontend run: %v\n", runErr)
+		return 1
+	}
+	return 0
+}
+
+func nodeStartConfigFromFlags(flags map[string]string) (app.NodeStartConfig, time.Duration, error) {
+	dataDir := flags["db"]
+	if dataDir == "" {
+		return app.NodeStartConfig{}, 0, fmt.Errorf("--db is required")
+	}
+
+	networkID := flags["network"]
+	if networkID == "" {
+		stored, err := app.ReadNetworkID(dataDir)
+		if err != nil {
+			return app.NodeStartConfig{}, 0, fmt.Errorf("--network is required (could not read stored network: %v)", err)
+		}
+		networkID = stored
+	}
+
+	listenHTTP := flags["listen-http"]
+	if listenHTTP == "" {
+		listenHTTP = "127.0.0.1:0"
+	}
+
+	var listenAddrs []string
+	if raw := flags["listen-p2p"]; raw != "" {
+		listenAddrs = strings.Split(raw, ",")
+		for i := range listenAddrs {
+			listenAddrs[i] = strings.TrimSpace(listenAddrs[i])
+		}
+	}
+
+	keyPath := flags["key"]
+	if keyPath == "" {
+		keyPath = dataDir + "/node_start.key"
+	}
+
+	var bootstrapPeers []string
+	if raw := flags["bootstrap"]; raw != "" {
+		for _, p := range strings.Split(raw, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				bootstrapPeers = append(bootstrapPeers, p)
+			}
+		}
+	}
+
+	rendezvousPrefix := flags["rendezvous"]
+	if rendezvousPrefix == "" {
+		rendezvousPrefix = "/librevote"
+	}
+
+	mode := flags["mode"]
+	if mode == "" {
+		mode = "auto"
+	}
+	switch mode {
+	case "auto", "server", "client":
+	default:
+		return app.NodeStartConfig{}, 0, fmt.Errorf("invalid --mode %q (valid: auto, server, client)", mode)
+	}
+
+	announceInterval := 10 * time.Second
+	if raw := flags["announce-interval"]; raw != "" {
+		d, durErr := time.ParseDuration(raw)
+		if durErr != nil {
+			return app.NodeStartConfig{}, 0, fmt.Errorf("invalid --announce-interval %q: %v", raw, durErr)
+		}
+		if d <= 0 {
+			return app.NodeStartConfig{}, 0, fmt.Errorf("--announce-interval must be positive")
+		}
+		announceInterval = d
+	}
+
+	return app.NodeStartConfig{
+		DataDir:          dataDir,
+		NetworkID:        networkID,
+		HTTPListenAddr:   listenHTTP,
+		KeyPath:          keyPath,
+		ListenAddrs:      listenAddrs,
+		BootstrapPeers:   bootstrapPeers,
+		RendezvousPrefix: rendezvousPrefix,
+		Mode:             mode,
+		AdvertisedHTTP:   flags["http-advertise"],
+		AnnounceInterval: announceInterval,
+	}, announceInterval, nil
+}
+
 var initKnownFlags = flagSet("db", "network")
 
 var trusteeElectionCreateKnownFlags = flagSet("db", "id", "network", "title")
@@ -1344,6 +1496,8 @@ var nodeServeKnownFlags = flagSet("db", "listen", "network")
 var nodeDiscoverKnownFlags = flagSet("db", "bootstrap", "listen", "key", "network", "rendezvous", "mode", "http-advertise")
 
 var nodeStartKnownFlags = flagSet("db", "listen-http", "listen-p2p", "key", "bootstrap", "http-advertise", "network", "rendezvous", "mode", "announce-interval")
+
+var frontendServeKnownFlags = flagSet("db", "listen-http", "listen-p2p", "key", "bootstrap", "http-advertise", "network", "rendezvous", "mode", "announce-interval")
 
 func flagSet(names ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(names))

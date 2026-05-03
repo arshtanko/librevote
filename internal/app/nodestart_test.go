@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+	"io"
 	nethttp "net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -133,6 +134,61 @@ func TestNodeStartHTTPAccessible(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != nethttp.StatusOK {
+		t.Fatalf("inventory status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestNodeStartExtraHandlerPreservesSyncEndpoints(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	svc, err := app.Open(dir, "testnet")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	svc.Close()
+
+	config := app.NodeStartConfig{
+		DataDir:        dir,
+		NetworkID:      "testnet",
+		HTTPListenAddr: "127.0.0.1:0",
+		KeyPath:        filepath.Join(dir, "node.key"),
+	}
+
+	ns, err := app.NewNodeStart(ctx, config, t.Logf)
+	if err != nil {
+		t.Fatalf("NewNodeStart: %v", err)
+	}
+	ns.SetExtraHTTPHandler(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		if r.URL.Path != "/" {
+			nethttp.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, "extra handler")
+	}))
+
+	if err := ns.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer ns.Stop()
+
+	resp, err := nethttp.Get("http://" + ns.Addr() + "/")
+	if err != nil {
+		t.Fatalf("GET extra: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "extra handler" {
+		t.Fatalf("extra body = %q", string(body))
+	}
+
+	resp, err = nethttp.Get("http://" + ns.Addr() + "/inventory?scope=network")
+	if err != nil {
+		t.Fatalf("GET inventory: %v", err)
+	}
+	defer resp.Body.Close()
 	if resp.StatusCode != nethttp.StatusOK {
 		t.Fatalf("inventory status = %d, want 200", resp.StatusCode)
 	}
