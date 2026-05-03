@@ -102,6 +102,19 @@ type FrontendVoteResult struct {
 	Message    string `json:"message"`
 }
 
+type ElectionResultResponse struct {
+	ElectionID            string                 `json:"election_id"`
+	Title                 string                 `json:"title"`
+	OptionResults         []ElectionOptionResult `json:"option_results"`
+	ValidBallotCount      int                    `json:"valid_ballot_count"`
+	ConflictedBallotCount int                    `json:"conflicted_ballot_count"`
+}
+
+type ElectionOptionResult struct {
+	Option string `json:"option"`
+	Count  int    `json:"count"`
+}
+
 var (
 	ErrFrontendElectionUnavailable    = errors.New("election is not available locally")
 	ErrFrontendTallyKeySetUnavailable = errors.New("tally key set is not available locally")
@@ -983,6 +996,87 @@ func (s *Service) BuildTallyResult(ctx context.Context, electionID string, repor
 	}
 
 	return s.ingestLocal(ctx, envelope, validation.StatusValid)
+}
+
+func (s *Service) GetElectionResult(ctx context.Context, electionID, requesterPeerID string) (ElectionResultResponse, error) {
+	electionID = strings.TrimSpace(electionID)
+	requesterPeerID = strings.TrimSpace(requesterPeerID)
+	if electionID == "" {
+		return ElectionResultResponse{}, errors.New("election_id is required")
+	}
+
+	isAuthorized := false
+	statuses, err := s.invitationStatuses(ctx, "")
+	if err != nil {
+		return ElectionResultResponse{}, err
+	}
+	for _, inv := range statuses {
+		if inv.ElectionID == electionID {
+			if inv.CreatorPeerID == requesterPeerID {
+				isAuthorized = true
+				break
+			}
+			for _, v := range inv.AcceptedPeerIDs {
+				if v == requesterPeerID {
+					isAuthorized = true
+					break
+				}
+			}
+			break
+		}
+	}
+	if !isAuthorized {
+		return ElectionResultResponse{}, errors.New("only election voters and creator can view results")
+	}
+
+	inputs, err := s.store.TallyComputationInputs(ctx, electionID)
+	if err != nil {
+		return ElectionResultResponse{}, fmt.Errorf("load tally inputs: %w", err)
+	}
+	if !inputs.ElectionFound || !inputs.ElectionStatus.Final() {
+		return ElectionResultResponse{}, errors.New("election not found or not finalized")
+	}
+
+	voted := make(map[string]bool)
+	for _, b := range inputs.RetainedBallots {
+		if b.Status == validation.StatusValidForTally {
+			voted[b.Payload.VoterID] = true
+		}
+	}
+	allVoted := true
+	for _, v := range inputs.Election.VoterAllowlist {
+		if !voted[v.VoterID] {
+			allVoted = false
+			break
+		}
+	}
+	if !allVoted {
+		missing := 0
+		for _, v := range inputs.Election.VoterAllowlist {
+			if !voted[v.VoterID] {
+				missing++
+			}
+		}
+		return ElectionResultResponse{}, fmt.Errorf("%d of %d voters have not yet voted", missing, len(inputs.Election.VoterAllowlist))
+	}
+
+	result := validation.ComputeLocalTallyResultForService(electionID, inputs.TallyKeySetHash, inputs.RetainedBallots, inputs.Election.Options)
+
+	optionResults := make([]ElectionOptionResult, 0, len(result.OptionResults))
+	for _, r := range result.OptionResults {
+		optionResults = append(optionResults, ElectionOptionResult{
+			Option: r.Option,
+			Count:  int(r.Count),
+		})
+	}
+
+	return ElectionResultResponse{
+		ElectionID:            electionID,
+		Title:                 inputs.Election.Title,
+		OptionResults:         optionResults,
+		ValidBallotCount:      int(result.ValidBallotCount),
+		ConflictedBallotCount: int(result.ConflictedBallotCount),
+	}, nil
 }
 
 func (s *Service) GetTallyComputationInputs(ctx context.Context, electionID string) (validation.TallyComputationInputs, error) {

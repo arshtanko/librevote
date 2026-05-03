@@ -34,6 +34,7 @@ type ElectionController interface {
 	DeclineElectionInvite(ctx context.Context, electionID, voterPeerID string) (app.ElectionStatus, error)
 	FinalizeElectionInvite(ctx context.Context, electionID, requesterPeerID string) (app.ElectionStatus, error)
 	CastFrontendVote(ctx context.Context, electionID, voterID, choice string) (app.FrontendVoteResult, error)
+	GetElectionResult(ctx context.Context, electionID, requesterPeerID string) (app.ElectionResultResponse, error)
 }
 
 type localVoterElectionController interface {
@@ -63,6 +64,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/elections/accept", s.handleElectionAccept)
 	mux.HandleFunc("/api/elections/decline", s.handleElectionDecline)
 	mux.HandleFunc("/api/elections/finalize", s.handleElectionFinalize)
+	mux.HandleFunc("/api/elections/result", s.handleElectionResult)
 	mux.HandleFunc("/api/vote/cast", s.handleVoteCast)
 	return mux
 }
@@ -333,6 +335,34 @@ func (s *Server) handleElectionFinalize(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleElectionResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	if s.electionController == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "election service is not available"})
+		return
+	}
+	localPeerID := strings.TrimSpace(s.controller.PeerID())
+	if localPeerID == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "local peer ID is not available"})
+		return
+	}
+	defer r.Body.Close()
+	var req acceptRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON body"})
+		return
+	}
+	result, err := s.electionController.GetElectionResult(r.Context(), req.ElectionID, localPeerID)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleVoteCast(w http.ResponseWriter, r *http.Request) {

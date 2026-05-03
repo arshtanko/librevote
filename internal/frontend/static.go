@@ -57,6 +57,7 @@ const indexHTML = `<!doctype html>
           <div><dt>Peer ID</dt><dd id="peer-id">loading...</dd></div>
           <div><dt>Connected peers</dt><dd id="connected">loading...</dd></div>
           <div><dt>Active peer IDs</dt><dd><div id="active-peers" class="list"></div></dd></div>
+          <div><dt>Listen multiaddrs</dt><dd><div id="listen" class="list"></div></dd></div>
         </dl>
       </section>
 
@@ -120,6 +121,7 @@ no</textarea></label>
       $('peer-id').textContent = networkStatus.peer_id || 'not available yet';
       $('connected').textContent = (networkStatus.connected_peer_count || 0) + ' connected';
       renderList('active-peers', networkStatus.connected_peer_ids || []);
+      renderList('listen', (networkStatus.listen_multiaddrs || []).filter(a => !/127\.0\.0\.1|::1|localhost/.test(a)));
       renderPeerPicker(networkStatus.connected_peer_ids || []);
       await refreshElectionStatus();
     }
@@ -160,12 +162,17 @@ no</textarea></label>
     }
 
     function renderElectionStatus(status) {
-      $('create-section').hidden = (status.elections || []).length > 0;
       renderElections(status);
       renderInvitations(status.invitations || [], status.pending_invitations || []);
     }
 
+    let expandedElections = new Set();
+    let voteChoices = {};
+    let revealedResults = {};
+
     function renderElections(status) {
+      const prevExpanded = new Set(expandedElections);
+      expandedElections = new Set();
       const el = $('elections-list');
       el.innerHTML = '';
       const elections = status.elections || [];
@@ -177,19 +184,27 @@ no</textarea></label>
         const card = document.createElement('div');
         card.className = 'invite-card';
 
+        const expanded = prevExpanded.has(e.election_id);
+        if (expanded) expandedElections.add(e.election_id);
+
         const h3 = document.createElement('h3');
         h3.style.cursor = 'pointer';
-        h3.textContent = '▾ ' + e.title + ' ' + (e.tally_key_set_available ? '[READY]' : '[PENDING TALLY]');
+        h3.textContent = (expanded ? '▾ ' : '▸ ') + e.title + ' ' + (e.tally_key_set_available ? '[READY]' : '[PENDING TALLY]');
         h3.onclick = () => {
           const body = card.querySelector('.election-body');
           body.hidden = !body.hidden;
+          if (body.hidden) {
+            expandedElections.delete(e.election_id);
+          } else {
+            expandedElections.add(e.election_id);
+          }
           h3.textContent = (body.hidden ? '▸ ' : '▾ ') + e.title + ' ' + (e.tally_key_set_available ? '[READY]' : '[PENDING TALLY]');
         };
         card.appendChild(h3);
 
         const body = document.createElement('div');
         body.className = 'election-body';
-        body.hidden = true;
+        body.hidden = !expanded;
 
         const dl = document.createElement('dl');
         const items = [
@@ -212,14 +227,75 @@ no</textarea></label>
         }
         body.appendChild(dl);
 
+        const resultDiv = document.createElement('div');
+        resultDiv.className = 'message muted';
+        resultDiv.style.marginTop = '4px';
+
+        if (revealedResults[e.election_id]) {
+          (async () => {
+            try {
+              const res = await fetch('/api/elections/result', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({election_id: e.election_id})
+              });
+              if (res.ok) {
+                const r = await res.json();
+                const html = (r.option_results || []).map(o => o.option + ': ' + o.count).join('<br>') +
+                  '<br><br>Valid ballots: ' + r.valid_ballot_count + ' | Conflicted: ' + r.conflicted_ballot_count;
+                revealedResults[e.election_id] = html;
+                resultDiv.innerHTML = html;
+                resultDiv.className = 'message ok';
+              }
+            } catch(err) {}
+          })();
+          resultDiv.innerHTML = revealedResults[e.election_id];
+          resultDiv.className = 'message ok';
+        } else {
+          const revealBtn = document.createElement('button');
+          revealBtn.textContent = 'Reveal Results';
+          revealBtn.style.marginTop = '8px';
+          revealBtn.onclick = async () => {
+            revealBtn.disabled = true;
+            try {
+              const res = await fetch('/api/elections/result', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({election_id: e.election_id})
+              });
+              if (!res.ok) {
+                resultDiv.textContent = (await res.json()).error;
+                resultDiv.className = 'message bad';
+              } else {
+                const r = await res.json();
+                const html = (r.option_results || []).map(o => o.option + ': ' + o.count).join('<br>') +
+                  '<br><br>Valid ballots: ' + r.valid_ballot_count + ' | Conflicted: ' + r.conflicted_ballot_count;
+                revealedResults[e.election_id] = html;
+                resultDiv.innerHTML = html;
+                resultDiv.className = 'message ok';
+                revealBtn.remove();
+              }
+            } catch(err) {
+              resultDiv.textContent = err.message;
+              resultDiv.className = 'message bad';
+            } finally {
+              revealBtn.disabled = false;
+            }
+          };
+          body.appendChild(revealBtn);
+        }
+        body.appendChild(resultDiv);
+
         if (e.tally_key_set_available && e.local_voter_signable && !e.local_voter_voted) {
           const select = document.createElement('select');
+          select.onchange = () => { voteChoices[e.election_id] = select.value; };
           for (const opt of (e.options || [])) {
             const o = document.createElement('option');
             o.value = opt;
             o.textContent = opt;
             select.appendChild(o);
           }
+          if (voteChoices[e.election_id]) select.value = voteChoices[e.election_id];
           const btn = document.createElement('button');
           btn.textContent = 'Vote';
           btn.style.marginLeft = '8px';
