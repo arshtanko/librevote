@@ -815,7 +815,7 @@ func TestCrossScopeGossipFullTally(t *testing.T) {
 		Title:                      "Cross-Scope Gossip Test",
 		Description:                "Full tally via gossip",
 		Options:                    []string{"yes", "no"},
-		VoterAllowlist:             []domain.VoterEntry{{VoterID: "v-1", VoterSigningPublicKey: voterPub, VoterEncryptionPublicKey: make([]byte, 32)}},
+		VoterAllowlist:             voterEntries,
 		TrusteeSelectionID:         "ts-csft",
 		TrusteeSelectionResultHash: result.ResultHash,
 		ThresholdT:                 domain.ThresholdV1,

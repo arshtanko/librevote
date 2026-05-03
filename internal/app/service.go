@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"librevote/internal/crypto"
@@ -35,10 +37,30 @@ type ElectionStatus struct {
 	ElectionID           string   `json:"election_id,omitempty"`
 	Title                string   `json:"title,omitempty"`
 	Options              []string `json:"options,omitempty"`
+	VoterIDs             []string `json:"voter_ids,omitempty"`
+	EligibleVoterIDs     []string `json:"eligible_voter_ids,omitempty"`
 	TallyKeySetAvailable bool     `json:"tally_key_set_available"`
 	BallotsSeen          int      `json:"ballots_seen"`
+	ValidBallotCount     int      `json:"valid_ballot_count"`
 	Message              string   `json:"message,omitempty"`
 }
+
+type FrontendVoteResult struct {
+	ElectionID string `json:"election_id"`
+	VoterID    string `json:"voter_id"`
+	Choice     string `json:"choice"`
+	ObjectID   string `json:"object_id,omitempty"`
+	Status     string `json:"status"`
+	Idempotent bool   `json:"idempotent"`
+	Message    string `json:"message"`
+}
+
+var (
+	ErrFrontendElectionUnavailable    = errors.New("election is not available locally")
+	ErrFrontendTallyKeySetUnavailable = errors.New("tally key set is not available locally")
+	ErrFrontendVoterNotEligible       = errors.New("voter is not eligible for this election")
+	ErrFrontendInvalidChoice          = errors.New("choice is not valid for this election")
+)
 
 func Open(dataDir, networkID string) (*Service, error) {
 	ctx := context.Background()
@@ -152,13 +174,33 @@ func (s *Service) ElectionStatus(ctx context.Context) (ElectionStatus, error) {
 	if !inputs.TallyKeySetFound {
 		message = "waiting for valid TallyKeySet"
 	}
+	eligibleVoterIDs := make([]string, 0, len(election.VoterAllowlist))
+	for _, voter := range election.VoterAllowlist {
+		eligibleVoterIDs = append(eligibleVoterIDs, voter.VoterID)
+	}
+	voterIDs := frontendSignableVoterIDs(election)
+	if inputs.TallyKeySetFound && len(voterIDs) == 0 {
+		message = "election is available, but this node has no local signing keys for eligible voters"
+	} else if len(voterIDs) == 0 {
+		message = strings.TrimSpace(message + "; no local signing keys for eligible voters")
+	}
+	validBallots := 0
+	for _, ballot := range inputs.RetainedBallots {
+		if ballot.Status == validation.StatusValidForTally {
+			validBallots++
+		}
+	}
+
 	return ElectionStatus{
 		Available:            true,
 		ElectionID:           election.ElectionID,
 		Title:                election.Title,
 		Options:              append([]string(nil), election.Options...),
+		VoterIDs:             voterIDs,
+		EligibleVoterIDs:     eligibleVoterIDs,
 		TallyKeySetAvailable: inputs.TallyKeySetFound,
 		BallotsSeen:          len(inputs.RetainedBallots),
+		ValidBallotCount:     validBallots,
 		Message:              message,
 	}, nil
 }
@@ -498,6 +540,76 @@ func (s *Service) CastBallot(ctx context.Context, electionID, voterID, choice st
 	return s.ingestLocal(ctx, envelope, validation.StatusValidForTally)
 }
 
+func (s *Service) CastFrontendVote(ctx context.Context, voterID, choice string) (FrontendVoteResult, error) {
+	voterID = strings.TrimSpace(voterID)
+	choice = strings.TrimSpace(choice)
+	if voterID == "" {
+		return FrontendVoteResult{}, fmt.Errorf("%w: voter_id is required", ErrFrontendVoterNotEligible)
+	}
+	if choice == "" {
+		return FrontendVoteResult{}, fmt.Errorf("%w: choice is required", ErrFrontendInvalidChoice)
+	}
+
+	election, err := s.currentAnonymousElection(ctx)
+	if err != nil {
+		return FrontendVoteResult{}, err
+	}
+	inputs, err := s.store.TallyComputationInputs(ctx, election.ElectionID)
+	if err != nil {
+		return FrontendVoteResult{}, fmt.Errorf("frontend vote inputs: %w", err)
+	}
+	if !inputs.ElectionFound || !inputs.ElectionStatus.Final() || inputs.ElectionStatus != validation.StatusValid {
+		return FrontendVoteResult{}, ErrFrontendElectionUnavailable
+	}
+	if !inputs.TallyKeySetFound {
+		return FrontendVoteResult{}, ErrFrontendTallyKeySetUnavailable
+	}
+
+	voterPriv := deterministicEd25519Priv(voterID)
+	voterPub := voterPriv.Public().(ed25519.PublicKey)
+	if !frontendVoterEligible(election, voterID, voterPub) {
+		return FrontendVoteResult{}, fmt.Errorf("%w: %s", ErrFrontendVoterNotEligible, voterID)
+	}
+	if !choiceAllowed(election.Options, choice) {
+		return FrontendVoteResult{}, fmt.Errorf("%w: %s", ErrFrontendInvalidChoice, choice)
+	}
+
+	for _, ballot := range inputs.RetainedBallots {
+		if ballot.Status == validation.StatusValidForTally && ballot.Payload.VoterID == voterID {
+			return FrontendVoteResult{
+				ElectionID: election.ElectionID,
+				VoterID:    voterID,
+				Choice:     ballot.Payload.Choice,
+				ObjectID:   ballot.ObjectID,
+				Status:     ballot.Status.String(),
+				Idempotent: true,
+				Message:    "voter already has a valid ballot locally",
+			}, nil
+		}
+	}
+
+	createdAt := time.Now().UnixMilli()
+	if createdAt < election.VotingStartsAt || createdAt > election.VotingEndsAt {
+		createdAt = election.VotingStartsAt
+	}
+	envelope, err := s.CastBallot(ctx, election.ElectionID, voterID, choice, voterPriv, createdAt)
+	if err != nil {
+		return FrontendVoteResult{}, fmt.Errorf("cast frontend vote: %w", err)
+	}
+	status, _, err := s.ValidationStatus(ctx, envelope.ObjectID)
+	if err != nil {
+		return FrontendVoteResult{}, fmt.Errorf("frontend vote status: %w", err)
+	}
+	return FrontendVoteResult{
+		ElectionID: election.ElectionID,
+		VoterID:    voterID,
+		Choice:     choice,
+		ObjectID:   envelope.ObjectID,
+		Status:     status.String(),
+		Message:    "vote cast",
+	}, nil
+}
+
 func (s *Service) BuildTallyResult(ctx context.Context, electionID string, reporterPublicKey []byte, reporterPrivKey ed25519.PrivateKey, createdAt int64) (domain.ObjectEnvelope, error) {
 	inputs, err := s.store.TallyComputationInputs(ctx, electionID)
 	if err != nil {
@@ -564,6 +676,53 @@ func (s *Service) LoadAnonymousElection(ctx context.Context, electionID string) 
 		return domain.AnonymousElectionPayload{}, fmt.Errorf("anonymous election %s not found", electionID)
 	}
 	return inputs.Election, nil
+}
+
+func (s *Service) currentAnonymousElection(ctx context.Context) (domain.AnonymousElectionPayload, error) {
+	refs, err := s.ListServableObjectRefs(ctx, string(domain.ScopeNetwork), "", []string{string(domain.ObjectTypeAnonymousElection)})
+	if err != nil {
+		return domain.AnonymousElectionPayload{}, fmt.Errorf("load current election: %w", err)
+	}
+	if len(refs) == 0 {
+		return domain.AnonymousElectionPayload{}, ErrFrontendElectionUnavailable
+	}
+	envelope, err := s.LoadObjectEnvelope(ctx, refs[0].ObjectID)
+	if err != nil {
+		return domain.AnonymousElectionPayload{}, fmt.Errorf("load election %s: %w", refs[0].ObjectID, err)
+	}
+	decoded, err := domain.DecodePayload(domain.ObjectTypeAnonymousElection, envelope.Payload)
+	if err != nil {
+		return domain.AnonymousElectionPayload{}, fmt.Errorf("decode election %s: %w", refs[0].ObjectID, err)
+	}
+	return decoded.(domain.AnonymousElectionPayload), nil
+}
+
+func frontendVoterEligible(election domain.AnonymousElectionPayload, voterID string, voterPublicKey ed25519.PublicKey) bool {
+	for _, voter := range election.VoterAllowlist {
+		if voter.VoterID == voterID && bytes.Equal(voter.VoterSigningPublicKey, voterPublicKey) {
+			return true
+		}
+	}
+	return false
+}
+
+func frontendSignableVoterIDs(election domain.AnonymousElectionPayload) []string {
+	voterIDs := make([]string, 0, len(election.VoterAllowlist))
+	for _, voter := range election.VoterAllowlist {
+		if bytes.Equal(voter.VoterSigningPublicKey, deterministicEd25519Pub(voter.VoterID)) {
+			voterIDs = append(voterIDs, voter.VoterID)
+		}
+	}
+	return voterIDs
+}
+
+func choiceAllowed(options []string, choice string) bool {
+	for _, option := range options {
+		if option == choice {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) RevalidateDependents(ctx context.Context, objectID string) error {

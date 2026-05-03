@@ -272,6 +272,9 @@ func TestElectionStartAndStatus(t *testing.T) {
 	if !started.Available || !started.TallyKeySetAvailable || started.ElectionID == "" || len(started.Options) == 0 {
 		t.Fatalf("unexpected started status: %+v", started)
 	}
+	if len(started.VoterIDs) == 0 {
+		t.Fatalf("started status missing voter ids: %+v", started)
+	}
 
 	resp2, err := http.Get(ts.URL + "/api/election/status")
 	if err != nil {
@@ -284,6 +287,144 @@ func TestElectionStartAndStatus(t *testing.T) {
 	}
 	if status.ElectionID != started.ElectionID || !status.TallyKeySetAvailable {
 		t.Fatalf("status after start = %+v, started %+v", status, started)
+	}
+}
+
+func TestVoteCastUnavailableBeforeStart(t *testing.T) {
+	svc, err := app.Open(t.TempDir(), "frontend-test")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer svc.Close()
+	ts := httptest.NewServer(NewServer(&fakeController{}, svc).Handler())
+	defer ts.Close()
+
+	resp := postVoteCast(t, ts.URL, `{"voter_id":"voter-1","choice":"yes"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	var body errorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if !strings.Contains(body.Error, "election is not available locally") {
+		t.Fatalf("error = %q", body.Error)
+	}
+}
+
+func TestVoteCastSuccessfulAfterStart(t *testing.T) {
+	svc, err := app.Open(t.TempDir(), "frontend-test")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer svc.Close()
+	ts := httptest.NewServer(NewServer(&fakeController{}, svc).Handler())
+	defer ts.Close()
+	postElectionStart(t, ts.URL)
+
+	resp := postVoteCast(t, ts.URL, `{"voter_id":"voter-1","choice":"yes"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body app.FrontendVoteResult
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode vote: %v", err)
+	}
+	if body.ObjectID == "" || body.Status != "valid_for_tally" || body.Idempotent {
+		t.Fatalf("unexpected vote response: %+v", body)
+	}
+
+	statusResp, err := http.Get(ts.URL + "/api/election/status")
+	if err != nil {
+		t.Fatalf("GET election status: %v", err)
+	}
+	defer statusResp.Body.Close()
+	var status app.ElectionStatus
+	if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if status.BallotsSeen != 1 || status.ValidBallotCount != 1 {
+		t.Fatalf("status counts = seen %d valid %d, want 1/1", status.BallotsSeen, status.ValidBallotCount)
+	}
+}
+
+func TestVoteCastInvalidVoterAndChoice(t *testing.T) {
+	svc, err := app.Open(t.TempDir(), "frontend-test")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer svc.Close()
+	ts := httptest.NewServer(NewServer(&fakeController{}, svc).Handler())
+	defer ts.Close()
+	postElectionStart(t, ts.URL)
+
+	for _, tt := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "invalid voter", body: `{"voter_id":"not-allowed","choice":"yes"}`, want: "voter is not eligible"},
+		{name: "invalid choice", body: `{"voter_id":"voter-1","choice":"maybe"}`, want: "choice is not valid"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := postVoteCast(t, ts.URL, tt.body)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			var body errorResponse
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode error: %v", err)
+			}
+			if !strings.Contains(body.Error, tt.want) {
+				t.Fatalf("error = %q, want containing %q", body.Error, tt.want)
+			}
+		})
+	}
+}
+
+func TestVoteCastDuplicateIsIdempotent(t *testing.T) {
+	svc, err := app.Open(t.TempDir(), "frontend-test")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer svc.Close()
+	ts := httptest.NewServer(NewServer(&fakeController{}, svc).Handler())
+	defer ts.Close()
+	postElectionStart(t, ts.URL)
+
+	firstResp := postVoteCast(t, ts.URL, `{"voter_id":"voter-1","choice":"yes"}`)
+	defer firstResp.Body.Close()
+	var first app.FrontendVoteResult
+	if err := json.NewDecoder(firstResp.Body).Decode(&first); err != nil {
+		t.Fatalf("decode first vote: %v", err)
+	}
+	secondResp := postVoteCast(t, ts.URL, `{"voter_id":"voter-1","choice":"no"}`)
+	defer secondResp.Body.Close()
+	if secondResp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", secondResp.StatusCode)
+	}
+	var second app.FrontendVoteResult
+	if err := json.NewDecoder(secondResp.Body).Decode(&second); err != nil {
+		t.Fatalf("decode second vote: %v", err)
+	}
+	if !second.Idempotent || second.ObjectID != first.ObjectID || second.Choice != "yes" {
+		t.Fatalf("duplicate response = %+v, first %+v", second, first)
+	}
+
+	statusResp, err := http.Get(ts.URL + "/api/election/status")
+	if err != nil {
+		t.Fatalf("GET election status: %v", err)
+	}
+	defer statusResp.Body.Close()
+	var status app.ElectionStatus
+	if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if status.BallotsSeen != 1 || status.ValidBallotCount != 1 {
+		t.Fatalf("status counts after duplicate = seen %d valid %d, want 1/1", status.BallotsSeen, status.ValidBallotCount)
 	}
 }
 
@@ -318,6 +459,15 @@ func postElectionStart(t *testing.T, baseURL string) app.ElectionStatus {
 		t.Fatalf("decode start: %v", err)
 	}
 	return body
+}
+
+func postVoteCast(t *testing.T, baseURL string, body string) *http.Response {
+	t.Helper()
+	resp, err := http.Post(baseURL+"/api/vote/cast", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST vote cast: %v", err)
+	}
+	return resp
 }
 
 func testMultiaddr(t *testing.T, port int) string {

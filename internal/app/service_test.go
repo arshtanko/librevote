@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"reflect"
 	"testing"
 
 	"librevote/internal/app"
@@ -115,6 +116,28 @@ func TestTrusteeSelectionHappyPath(t *testing.T) {
 
 	for _, env := range []domain.ObjectEnvelope{voteEnv, resultEnv} {
 		t.Logf("  %s: %s", env.ObjectType, env.ObjectID)
+	}
+}
+
+func TestElectionStatusListsDeterministicMVPSignableVoters(t *testing.T) {
+	ctx := context.Background()
+	svc, err := app.Open(t.TempDir(), "testnet")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer svc.Close()
+
+	status, err := svc.StartMVPElection(ctx)
+	if err != nil {
+		t.Fatalf("StartMVPElection() error = %v", err)
+	}
+
+	want := []string{"voter-1", "voter-2", "voter-3"}
+	if !reflect.DeepEqual(status.VoterIDs, want) {
+		t.Fatalf("signable voter_ids = %v, want %v", status.VoterIDs, want)
+	}
+	if !reflect.DeepEqual(status.EligibleVoterIDs, want) {
+		t.Fatalf("eligible_voter_ids = %v, want %v", status.EligibleVoterIDs, want)
 	}
 }
 
@@ -259,7 +282,7 @@ func TestActivationHappyPath(t *testing.T) {
 		Title:                      "Anonymous Election",
 		Description:                "MVP test election",
 		Options:                    []string{"yes", "no"},
-		VoterAllowlist:             []domain.VoterEntry{{VoterID: "v-1", VoterSigningPublicKey: voter.pub, VoterEncryptionPublicKey: make([]byte, 32)}},
+		VoterAllowlist:             []domain.VoterEntry{{VoterID: "voter-1", VoterSigningPublicKey: voter.pub, VoterEncryptionPublicKey: make([]byte, 32)}},
 		TrusteeSelectionID:         "ts-act-1",
 		TrusteeSelectionResultHash: resultEnv.Payload[:0],
 		ThresholdT:                 domain.ThresholdV1,
@@ -415,14 +438,20 @@ func TestBallotCastAndTallyHappyPath(t *testing.T) {
 	}
 	resultPayload, _ := domain.DecodePayload(domain.ObjectTypeTrusteeSelectionResult, resultEnv.Payload)
 	result := resultPayload.(domain.TrusteeSelectionResultPayload)
+	voter2Key := newTestKey(t)
+	voter3Key := newTestKey(t)
 
 	anonPayload := domain.AnonymousElectionPayload{
-		ElectionID:                 "an-bt-1",
-		NetworkID:                  "testnet",
-		Title:                      "Ballot Election",
-		Description:                "Test",
-		Options:                    []string{"yes", "no", "maybe"},
-		VoterAllowlist:             []domain.VoterEntry{{VoterID: "v-1", VoterSigningPublicKey: voter.pub, VoterEncryptionPublicKey: make([]byte, 32)}},
+		ElectionID:  "an-bt-1",
+		NetworkID:   "testnet",
+		Title:       "Ballot Election",
+		Description: "Test",
+		Options:     []string{"yes", "no", "maybe"},
+		VoterAllowlist: []domain.VoterEntry{
+			{VoterID: "voter-1", VoterSigningPublicKey: voter.pub, VoterEncryptionPublicKey: make([]byte, 32)},
+			{VoterID: "voter-2", VoterSigningPublicKey: voter2Key.pub, VoterEncryptionPublicKey: randomBytes(t, 32)},
+			{VoterID: "voter-3", VoterSigningPublicKey: voter3Key.pub, VoterEncryptionPublicKey: randomBytes(t, 32)},
+		},
 		TrusteeSelectionID:         "ts-bt-1",
 		TrusteeSelectionResultHash: result.ResultHash,
 		ThresholdT:                 domain.ThresholdV1,
@@ -483,7 +512,6 @@ func TestBallotCastAndTallyHappyPath(t *testing.T) {
 	assertStatus(t, ctx, svc, ballotEnv1.ObjectID, validation.StatusValidForTally)
 	t.Logf("ballot voter-1:yes = %s", ballotEnv1.ObjectID)
 
-	voter2Key := newTestKey(t)
 	ballotEnv2, err := svc.CastBallot(ctx, "an-bt-1", "voter-2", "no", voter2Key.priv, 9600)
 	if err != nil {
 		t.Fatalf("CastBallot(voter-2:no) error = %v", err)
@@ -491,7 +519,6 @@ func TestBallotCastAndTallyHappyPath(t *testing.T) {
 	assertStatus(t, ctx, svc, ballotEnv2.ObjectID, validation.StatusValidForTally)
 	t.Logf("ballot voter-2:no = %s", ballotEnv2.ObjectID)
 
-	voter3Key := newTestKey(t)
 	ballotEnv3, err := svc.CastBallot(ctx, "an-bt-1", "voter-3", "maybe", voter3Key.priv, 9700)
 	if err != nil {
 		t.Fatalf("CastBallot(voter-3:maybe) error = %v", err)
@@ -591,7 +618,7 @@ func TestBallotDuplicateConflict(t *testing.T) {
 		Title:                      "Duplicate Test",
 		Description:                "Test",
 		Options:                    []string{"yes", "no"},
-		VoterAllowlist:             []domain.VoterEntry{{VoterID: "v-1", VoterSigningPublicKey: voter.pub, VoterEncryptionPublicKey: make([]byte, 32)}},
+		VoterAllowlist:             []domain.VoterEntry{{VoterID: "voter-1", VoterSigningPublicKey: voter.pub, VoterEncryptionPublicKey: make([]byte, 32)}},
 		TrusteeSelectionID:         "ts-dc-1",
 		TrusteeSelectionResultHash: result.ResultHash,
 		ThresholdT:                 domain.ThresholdV1,
@@ -738,7 +765,7 @@ func TestTallyResultMismatchRejection(t *testing.T) {
 		Title:                      "Rejection Test",
 		Description:                "Test",
 		Options:                    []string{"yes", "no"},
-		VoterAllowlist:             []domain.VoterEntry{{VoterID: "v-1", VoterSigningPublicKey: voter.pub, VoterEncryptionPublicKey: make([]byte, 32)}},
+		VoterAllowlist:             []domain.VoterEntry{{VoterID: "voter-1", VoterSigningPublicKey: voter.pub, VoterEncryptionPublicKey: make([]byte, 32)}},
 		TrusteeSelectionID:         "ts-rej-1",
 		TrusteeSelectionResultHash: result.ResultHash,
 		ThresholdT:                 domain.ThresholdV1,

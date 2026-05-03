@@ -91,6 +91,16 @@ func verifyAnonymousBallot(envelope domain.ObjectEnvelope, payload domain.Anonym
 	if !choiceValid {
 		return invalidBallot("ballot choice is not one of election options")
 	}
+	voterEligible := false
+	for _, voter := range inputs.Election.VoterAllowlist {
+		if voter.VoterID == payload.VoterID && bytes.Equal(voter.VoterSigningPublicKey, payload.VoterPublicKey) {
+			voterEligible = true
+			break
+		}
+	}
+	if !voterEligible {
+		return invalidBallot("ballot voter is not in election allowlist")
+	}
 	if !verifyPayloadSignature(envelope, crypto.DomainAnonymousBallotSign, domain.AnonymousBallotSignatureField(), payload.VoterPublicKey, payload.Signature) {
 		return invalidBallot("anonymous ballot signature is invalid")
 	}

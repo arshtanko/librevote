@@ -3,6 +3,7 @@ package frontend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,7 @@ type Controller interface {
 type ElectionController interface {
 	ElectionStatus(ctx context.Context) (app.ElectionStatus, error)
 	StartMVPElection(ctx context.Context) (app.ElectionStatus, error)
+	CastFrontendVote(ctx context.Context, voterID, choice string) (app.FrontendVoteResult, error)
 }
 
 type Server struct {
@@ -49,6 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/network/connect", s.handleConnect)
 	mux.HandleFunc("/api/election/status", s.handleElectionStatus)
 	mux.HandleFunc("/api/election/start", s.handleElectionStart)
+	mux.HandleFunc("/api/vote/cast", s.handleVoteCast)
 	return mux
 }
 
@@ -85,6 +88,11 @@ type entryError struct {
 type errorResponse struct {
 	Error          string       `json:"error"`
 	InvalidEntries []entryError `json:"invalid_entries,omitempty"`
+}
+
+type voteCastRequest struct {
+	VoterID string `json:"voter_id"`
+	Choice  string `json:"choice"`
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -199,6 +207,41 @@ func (s *Server) handleElectionStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleVoteCast(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	if s.electionController == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "election service is not available"})
+		return
+	}
+	defer r.Body.Close()
+
+	var req voteCastRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON body"})
+		return
+	}
+	result, err := s.electionController.CastFrontendVote(r.Context(), req.VoterID, req.Choice)
+	if err != nil {
+		writeJSON(w, voteErrorStatus(err), errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func voteErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, app.ErrFrontendElectionUnavailable), errors.Is(err, app.ErrFrontendTallyKeySetUnavailable):
+		return http.StatusConflict
+	case errors.Is(err, app.ErrFrontendVoterNotEligible), errors.Is(err, app.ErrFrontendInvalidChoice):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func (s *Server) status() statusResponse {
