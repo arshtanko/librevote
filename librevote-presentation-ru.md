@@ -1,26 +1,38 @@
-
+---
+marp: true
+title: LibreVote - архитектура проверяемого P2P-голосования
+description: 10-минутная презентация по русскоязычной документации LibreVote
+theme: default
+paginate: true
+---
 
 # LibreVote
 
 ## Проверяемое P2P-голосование с анонимными бюллетенями
 
+**Тайминг: около 10 минут.** От CLI до результата, через каждый слой системы.
 
+`Журнал объектов + локальная проверка + слепые токены + пороговый подсчет`
+
+<!-- speaker: 20 секунд. Главная мысль: LibreVote не просит доверять серверу. Каждый узел хранит объекты, сам их проверяет и сам пересчитывает результат. -->
+
+---
 
 # Главный Тезис
 
 LibreVote строит доверие не через центральный сервер, а через три механизма:
 
-1. **Immutable object log:** все важные события являются неизменяемыми объектами.
+1. **Неизменяемый журнал объектов:** все важные события являются неизменяемыми объектами.
 2. **Детерминированная локальная проверка:** каждый узел сам решает, что валидно.
-3. **Криптографическая приватность:** право голоса отделяется от личности через blind tokens, а выбор шифруется threshold-ключом.
+3. **Криптографическая приватность:** право голоса отделяется от личности через слепые токены, а выбор шифруется пороговым ключом.
 
 ```mermaid
 flowchart LR
   A[Пользователь] --> B[Публикует объект]
-  B --> C[P2P сеть разносит ссылку]
-  C --> D[Узел догружает payload]
+  B --> C[P2P-доставка разносит ссылку]
+  C --> D[Узел догружает содержимое]
   D --> E[Локально валидирует]
-  E --> F[Пересчитывает derived state]
+  E --> F[Пересчитывает производное состояние]
   F --> G[Показывает проверенный результат]
 ```
 
@@ -34,31 +46,31 @@ flowchart LR
 flowchart TB
   subgraph UX[Пользовательский контур]
     CLI[CLI]
-    UI[Frontend / Result display]
+    UI[Интерфейс результатов]
   end
 
-  subgraph NODE[Node lifecycle]
-    Workers[Workers: sync, validation, issuance, voting, tally]
-    Control[Local Control API]
+  subgraph NODE[Жизненный цикл узла]
+    Workers[Фоновые процессы: синхронизация, проверка, выдача, голосование, подсчет]
+    Control[Локальный управляющий API]
   end
 
   subgraph DOMAIN[Доменная логика]
-    Data[Data model]
-    Validation[Validation layer]
-    Trustee[Trustee selection]
-    Blind[Blind token issuance]
-    Ballots[Ballots]
-    Tally[Tally layer]
+    Data[Модель данных]
+    Validation[Слой проверки]
+    Trustee[Выбор доверенных участников]
+    Blind[Выдача слепых токенов]
+    Ballots[Бюллетени]
+    Tally[Слой подсчета]
   end
 
   subgraph CORE[Локальное ядро]
-    Crypto[Crypto layer]
-    Storage[SQLite storage]
+    Crypto[Криптографический слой]
+    Storage[Хранилище SQLite]
   end
 
   subgraph P2P[P2P доставка]
-    Protocol[Protocol messages]
-    Transport[Transport layer]
+    Protocol[Сообщения протокола]
+    Transport[Транспортный слой]
   end
 
   CLI --> Control --> Workers
@@ -73,47 +85,61 @@ flowchart TB
 
 ---
 
-# 1. CLI И Local Control API
+# 1. CLI И Локальный Управляющий API
 
-**Роль:** безопасная точка входа для оператора, избирателя и trustee.
+**Роль:** безопасная точка входа для оператора, избирателя и доверенного участника.
 
-CLI не должен напрямую менять SQLite и не должен обходить node process. Он вызывает локальный control API работающего узла.
+CLI не должен напрямую менять SQLite и не должен обходить процесс узла. Он вызывает локальный управляющий API работающего узла.
 
 ```mermaid
 sequenceDiagram
   participant User as Пользователь
   participant CLI as CLI
-  participant API as Local Control API
-  participant Node as Node workers
+  participant API as Управляющий API
+  participant Node as Процессы узла
   participant Store as SQLite
 
-  User->>CLI: vote cast / tally compute / result show
+  User->>CLI: отдать голос / посчитать / показать результат
   CLI->>API: локальная команда
-  API->>Node: задача для worker'а
-  Node->>Store: читает object log и ключи
+  API->>Node: задача для фонового процесса
+  Node->>Store: читает журнал объектов и ключи
   Node-->>API: проверенный статус
-  API-->>CLI: machine-readable output
+  API-->>CLI: структурированный ответ
   CLI-->>User: понятный результат
 ```
 
-**Почему отдельный слой важен:** команды пользователя остаются воспроизводимыми, а вся доменная логика проходит через один node lifecycle.
+**Почему отдельный слой важен:** команды пользователя остаются воспроизводимыми, а вся доменная логика проходит через единый жизненный цикл узла.
 
 <!-- speaker: 20 секунд. У CLI роль интерфейса, а не источника истины. Это снижает риск, что разные команды создадут разные правила работы с данными. -->
 
 ---
 
-# 2. Node Lifecycle
+# 2. Жизненный Цикл Узла
 
 **Роль:** собрать транспорт, сеть, хранилище, ключи и фоновые процессы в один управляемый узел.
 
 ```mermaid
 stateDiagram-v2
+  Init: Инициализация
+  StorageReady: Хранилище готово
+  KeysReady: Ключи готовы
+  TransportReady: Транспорт готов
+  SyncReady: Синхронизация готова
+  Rebuild: Пересборка состояния
+  Running: Узел работает
+  SyncWorker: Процесс синхронизации
+  ValidationWorker: Процесс проверки
+  IssuanceWorker: Процесс выдачи токенов
+  VotingWorker: Процесс голосования
+  TallyWorker: Процесс подсчета
+  Shutdown: Остановка
+
   [*] --> Init
-  Init --> StorageReady: process lock + schema
-  StorageReady --> KeysReady: unlock policy
-  KeysReady --> TransportReady: node identity + QUIC
-  TransportReady --> SyncReady: discovery + sync protocols
-  SyncReady --> Rebuild: пересчет local state
+  Init --> StorageReady: блокировка процесса + схема
+  StorageReady --> KeysReady: правило разблокировки ключей
+  KeysReady --> TransportReady: идентичность узла + QUIC
+  TransportReady --> SyncReady: обнаружение узлов + протоколы синхронизации
+  SyncReady --> Rebuild: пересчет локального состояния
   Rebuild --> Running
 
   Running --> SyncWorker
@@ -125,96 +151,96 @@ stateDiagram-v2
   Shutdown --> [*]
 ```
 
-**Ключевая идея:** после падения узел может восстановиться из object log и заново построить derived state.
+**Ключевая идея:** после падения узел может восстановиться из журнала объектов и заново построить производное состояние.
 
-<!-- speaker: 20 секунд. Node lifecycle отвечает за порядок запуска и восстановление. Derived state не является источником истины, поэтому rebuild безопасен. -->
+<!-- speaker: 20 секунд. Жизненный цикл узла отвечает за порядок запуска и восстановление. Производное состояние не является источником истины, поэтому пересборка безопасна. -->
 
 ---
 
-# 3. Transport Layer
+# 3. Транспортный Слой
 
 **Роль:** соединять узлы, не зная ничего о голосованиях.
 
 ```mermaid
 flowchart LR
-  A[Node identity key] --> B[libp2p peer id]
-  B --> C[Multiaddr]
-  C --> D[QUIC connection]
-  D --> E[Streams]
-  E --> F["protocol streams"]
+  A[Ключ идентичности узла] --> B[Идентификатор узла libp2p]
+  B --> C[Многоадресный адрес]
+  C --> D[Соединение QUIC]
+  D --> E[Потоки]
+  E --> F["потоки протокола"]
 ```
 
 **Что делает слой:**
 
-- node identity, QUIC, multiaddr, streams;
-- таймауты, лимиты, connection lifecycle;
-- базовая reachability и NAT-реальность.
+- идентичность узла, QUIC, многоадресные адреса, потоки;
+- таймауты, лимиты, жизненный цикл соединений;
+- базовая достижимость узла и особенности NAT.
 
-**Что не делает:** не проверяет бюллетени, не считает результат, не знает voter keys.
+**Что не делает:** не проверяет бюллетени, не считает результат, не знает ключи избирателя.
 
-<!-- speaker: 20 секунд. Важно отделить node key от voter/trustee keys: сетевой peer не равен избирателю. -->
+<!-- speaker: 20 секунд. Важно отделить ключ узла от ключей избирателя и доверенного участника: сетевой узел не равен избирателю. -->
 
 ---
 
-# 4. Protocol Messages
+# 4. Сообщения Протокола
 
 **Роль:** разделить доменные объекты и служебные сетевые сообщения.
 
 ```mermaid
 flowchart LR
-  subgraph Domain[Domain objects]
+  subgraph Domain[Доменные объекты]
     OE[ObjectEnvelope]
-    Payload[Canonical payload]
+    Payload[Каноническое содержимое]
     ID[object_id]
-    Log[Object log]
+    Log[Журнал объектов]
     OE --> Payload --> ID --> Log
   end
 
-  subgraph Sync[Sync messages]
+  subgraph Sync[Сообщения синхронизации]
     Hello[Hello]
     Inv[Inventory]
     Ann[ObjectAnnouncement]
     Get[GetObject/GetObjects]
   end
 
-  Ann -. object_id only .-> OE
-  Get -. returns full object .-> OE
+  Ann -. только object_id .-> OE
+  Get -. возвращает полный объект .-> OE
 ```
 
 **Правило:** `ObjectAnnouncement` говорит только: «у меня есть объект». Он не доказывает, что объект валиден.
 
-<!-- speaker: 25 секунд. Это предотвращает смешивание delivery и truth. Истина появляется только после canonical hash, подписи, зависимостей и конфликтов. -->
+<!-- speaker: 25 секунд. Это предотвращает смешивание доставки и истины. Истина появляется только после канонического хеша, подписи, зависимостей и конфликтов. -->
 
 ---
 
-# 5. Storage Layer
+# 5. Слой Хранения
 
-**Роль:** сохранить все полученные объекты и локальные выводы, не превращая derived state в источник истины.
+**Роль:** сохранить все полученные объекты и локальные выводы, не превращая производное состояние в источник истины.
 
 ```mermaid
 flowchart TB
-  A[Object ingestion transaction] --> B[object_metadata]
-  A --> C[object_payloads]
-  A --> D[validation_records]
-  A --> E[object_dependencies]
-  A --> F[source_peer_metadata]
+  A[Транзакция приема объекта] --> B[метаданные объекта]
+  A --> C[содержимое объекта]
+  A --> D[записи проверки]
+  A --> E[зависимости объекта]
+  A --> F[метаданные источника]
 
-  C --> G[Immutable object log]
-  D --> H[Revalidation queue]
-  G --> I[Derived state rebuild]
+  C --> G[Неизменяемый журнал объектов]
+  D --> H[Очередь повторной проверки]
+  G --> I[Пересборка производного состояния]
   H --> I
-  I --> J[ElectionState / TallyState / UI]
+  I --> J[Состояние голосования / состояние подсчета / интерфейс]
 
-  K[Encrypted key store] --> L[voter, trustee, node keys]
+  K[Зашифрованное хранилище ключей] --> L[ключи избирателя, доверенного участника и узла]
 ```
 
-**Инвариант:** если derived state поврежден или устарел, его можно пересчитать из retained objects.
+**Инвариант:** если производное состояние повреждено или устарело, его можно пересчитать из сохраненных объектов.
 
-<!-- speaker: 30 секунд. SQLite хранит payload, metadata, validation records, dependencies, sync state и зашифрованные ключи. Но главное - object log. -->
+<!-- speaker: 30 секунд. SQLite хранит содержимое, метаданные, записи проверки, зависимости, состояние синхронизации и зашифрованные ключи. Но главное - журнал объектов. -->
 
 ---
 
-# 6. Data Model
+# 6. Модель Данных
 
 **Роль:** описать неизменяемые объекты, зависимости и конфликтные ключи.
 
@@ -244,219 +270,219 @@ flowchart LR
 
 **Главное:** `TrusteeSelectionResult` и `TallyResult` публикуются для удобства, но принимаются только после локального пересчета.
 
-<!-- speaker: 35 секунд. Data model фиксирует две большие части: выбор trustees и основное анонимное голосование. -->
+<!-- speaker: 35 секунд. Модель данных фиксирует две большие части: выбор доверенных участников и основное анонимное голосование. -->
 
 ---
 
-# 7. Crypto Layer
+# 7. Криптографический Слой
 
-**Роль:** дать проверяемую идентичность объектов, подписи, приватность бюллетеня и threshold-раскрытие результата.
+**Роль:** дать проверяемую идентичность объектов, подписи, приватность бюллетеня и пороговое раскрытие результата.
 
 ```mermaid
 flowchart TB
-  A[Canonical protobuf bytes] --> B[SHA-256 object_id]
+  A[Канонические байты protobuf] --> B[SHA-256 object_id]
   B --> C[ObjectEnvelope]
-  D[Ed25519 signatures] --> C
+  D[Подписи Ed25519] --> C
   E[Object PoW] --> C
 
-  F[Blind Schnorr token] --> G[Eligibility proof]
-  H[HPKE encrypted issue] --> G
-  I[Threshold ElGamal] --> J[Encrypted choice]
-  J --> K[Homomorphic tally]
-  K --> L[2-of-3 decryption shares]
+  F[Слепой токен Schnorr] --> G[Доказательство права голоса]
+  H[Зашифрованная выдача через HPKE] --> G
+  I[Пороговый ElGamal] --> J[Зашифрованный выбор]
+  J --> K[Гомоморфный подсчет]
+  K --> L[2 из 3 долей расшифровки]
 ```
 
-**Ключевая граница:** криптографические проверки выполняются над canonical bytes и явно заданными signing/proof payloads, а приватные ключи не попадают в сетевые объекты.
+**Ключевая граница:** криптографические проверки выполняются над каноническими байтами и явно заданными данными для подписи или доказательства, а приватные ключи не попадают в сетевые объекты.
 
-<!-- speaker: 35 секунд. Набор примитивов: canonical hashing, Ed25519, PoW, blind tokens, HPKE, threshold ElGamal и local key encryption. -->
+<!-- speaker: 35 секунд. Набор примитивов: каноническое хеширование, Ed25519, PoW, слепые токены, HPKE, пороговый ElGamal и локальное шифрование ключей. -->
 
 ---
 
-# 8. Validation Layer
+# 8. Слой Проверки
 
 **Роль:** превратить «получен объект» в один из локальных статусов.
 
 ```mermaid
 flowchart LR
-  A[Received ObjectEnvelope] --> B[Envelope validation]
-  B --> C[Structural validation]
-  C --> D{Dependencies ready?}
+  A[Получен ObjectEnvelope] --> B[Проверка конверта]
+  B --> C[Проверка структуры]
+  C --> D{Зависимости готовы?}
   D -- нет --> E[pending_dependencies]
-  D -- да --> F[Contextual validation]
-  F --> G[Conflict resolution]
-  G --> H[Derived verification]
-  H --> I{Outcome}
+  D -- да --> F[Контекстная проверка]
+  F --> G[Разбор конфликтов]
+  G --> H[Проверка производных данных]
+  H --> I{Итог}
   I --> V[valid]
   I --> T[valid_for_tally]
   I --> C2[valid_but_conflicted]
   I --> X[invalid]
 ```
 
-**Конфликтное правило:** если в conflict group больше одного валидного объекта, вся группа исключается. Нет победителя по времени, peer, PoW или hash.
+**Конфликтное правило:** если в конфликтной группе больше одного валидного объекта, вся группа исключается. Нет победителя по времени, узлу, PoW или хешу.
 
-<!-- speaker: 40 секунд. Валидация стадийная: envelope, структура, зависимости, контекст, конфликты, derived verification. Это сердце локального консенсуса без блокчейна. -->
+<!-- speaker: 40 секунд. Проверка стадийная: конверт, структура, зависимости, контекст, конфликты, проверка производных данных. Это сердце локального консенсуса без блокчейна. -->
 
 ---
 
-# 9. Trustee Selection Layer
+# 9. Слой Выбора Доверенных Участников
 
-**Роль:** публично и детерминированно выбрать trustees для анонимного голосования.
+**Роль:** публично и детерминированно выбрать доверенных участников для анонимного голосования.
 
 ```mermaid
 flowchart TD
-  A[TrusteeSelectionElection] --> B[Nomination window]
+  A[TrusteeSelectionElection] --> B[Окно выдвижения]
   B --> C[TrusteeNomination]
-  A --> D[Voting window]
+  A --> D[Окно голосования]
   D --> E[TrusteeVote]
-  C --> F[Deterministic candidate ranking]
+  C --> F[Детерминированный рейтинг кандидатов]
   E --> F
   F --> G[TrusteeSelectionResult]
-  G --> H[AnonymousElection привязывается к result_hash]
+  G --> H[AnonymousElection привязывается к хешу результата]
   H --> I[TrusteeConsent]
-  I --> J[Final trustee set: first 3 with valid consent]
+  I --> J[Итоговый набор: первые 3 с валидным согласием]
 ```
 
 **Параметры:** `n = 3`, `t = 2`, `max_choices_per_vote = 3`.
 
-<!-- speaker: 30 секунд. Trustee selection публичный и неанонимный. Его задача - получить упорядоченный список кандидатов, а затем финальный набор из тех, кто дал consent. -->
+<!-- speaker: 30 секунд. Выбор доверенных участников публичный и неанонимный. Его задача - получить упорядоченный список кандидатов, а затем финальный набор из тех, кто дал согласие. -->
 
 ---
 
-# 10. Blind Token Issuance
+# 10. Выдача Слепых Токенов
 
-**Роль:** выдать право анонимного голосования так, чтобы trustees знали eligibility, но не знали будущий token.
+**Роль:** выдать право анонимного голосования так, чтобы доверенные участники знали право избирателя на голос, но не знали будущий токен.
 
 ```mermaid
 sequenceDiagram
-  participant V as Voter
-  participant P2P as P2P object log
-  participant T1 as Trustee 1
-  participant T2 as Trustee 2
-  participant T3 as Trustee 3
+  participant V as Избиратель
+  participant P2P as P2P журнал объектов
+  participant T1 as Участник 1
+  participant T2 as Участник 2
+  participant T3 as Участник 3
 
-  V->>V: генерирует token keypair
-  V->>V: blind(token_public_key)
-  V->>P2P: BlindTokenRequest(voter_public_key, blinded_message)
-  P2P->>T1: валидный request
-  P2P->>T2: валидный request
-  P2P->>T3: валидный request
-  T1->>P2P: encrypted BlindTokenIssue
-  T2->>P2P: encrypted BlindTokenIssue
-  T3->>P2P: encrypted BlindTokenIssue
-  V->>V: decrypt + unblind signatures
-  V->>V: получает >= 2 signatures от разных trustees
+  V->>V: генерирует пару ключей токена
+  V->>V: ослепляет публичный ключ токена
+  V->>P2P: BlindTokenRequest с ослепленным сообщением
+  P2P->>T1: валидный запрос
+  P2P->>T2: валидный запрос
+  P2P->>T3: валидный запрос
+  T1->>P2P: зашифрованный BlindTokenIssue
+  T2->>P2P: зашифрованный BlindTokenIssue
+  T3->>P2P: зашифрованный BlindTokenIssue
+  V->>V: расшифровывает и снимает ослепление подписей
+  V->>V: получает >= 2 подписи от разных участников
 ```
 
-**Privacy split:** `BlindTokenRequest` публично показывает участие voter, но `AnonymousBallot` уже не содержит `voter_public_key`.
+**Разделение приватности:** `BlindTokenRequest` публично показывает участие избирателя, но `AnonymousBallot` уже не содержит `voter_public_key`.
 
-<!-- speaker: 40 секунд. Это мост между публичным allowlist и анонимным бюллетенем. Trustees подписывают blinded message, поэтому не узнают token_public_key. -->
+<!-- speaker: 40 секунд. Это мост между публичным списком избирателей и анонимным бюллетенем. Доверенные участники подписывают ослепленное сообщение, поэтому не узнают публичный ключ токена. -->
 
 ---
 
-# 11. Ballots Layer
+# 11. Слой Бюллетеней
 
-**Роль:** принять один анонимный encrypted vote от holder'а валидного token proof.
+**Роль:** принять один анонимный зашифрованный голос от владельца валидного доказательства токена.
 
 ```mermaid
 flowchart LR
   subgraph Public[Что видно всем]
-    A[encrypted_choice]
-    B[choice_validity_proof]
-    C[token_public_key]
-    D[token_nullifier]
-    E[eligibility_proof]
-    F[token_holder_signature]
+    A[зашифрованный выбор]
+    B[доказательство корректности выбора]
+    C[публичный ключ токена]
+    D[идентификатор использования токена]
+    E[доказательство права голоса]
+    F[подпись владельца токена]
   end
 
   subgraph Hidden[Чего нет в бюллетене]
-    G[voter_public_key]
-    H[node_peer_id]
-    I[source peer как авторитет]
+    G[публичный ключ избирателя]
+    H[идентификатор сетевого узла]
+    I[узел-источник как авторитет]
   end
 
   J[AnonymousBallot] --> Public
   Hidden -. не включается .-> J
 ```
 
-**Double voting policy:** один `election_id || token_nullifier` должен иметь один валидный ballot. Несколько валидных бюллетеней с тем же nullifier исключаются все.
+**Правило повторного голосования:** одна пара `election_id || token_nullifier` должна иметь один валидный бюллетень. Несколько валидных бюллетеней с тем же идентификатором использования токена исключаются все.
 
-<!-- speaker: 35 секунд. Анонимность здесь криптографическая, не сетевая. Timing и первый распространитель могут оставаться metadata-риском. -->
+<!-- speaker: 35 секунд. Анонимность здесь криптографическая, не сетевая. Время публикации и первый распространитель могут оставаться риском утечки метаданных. -->
 
 ---
 
-# 12. Tally Layer
+# 12. Слой Подсчета
 
-**Роль:** посчитать результат из `valid_for_tally` бюллетеней и проверить опубликованный `TallyResult`.
+**Роль:** посчитать результат из бюллетеней со статусом `valid_for_tally` и проверить опубликованный `TallyResult`.
 
 ```mermaid
 flowchart TD
-  A[valid_for_tally AnonymousBallots] --> B[Homomorphic encrypted tally]
-  B --> C[encrypted_tally_hash]
-  C --> D[TallyDecryptionShare от trustee A]
-  C --> E[TallyDecryptionShare от trustee B]
-  C --> F[TallyDecryptionShare от trustee C]
-  D --> G{>= 2 valid shares?}
+  A[AnonymousBallot со статусом valid_for_tally] --> B[Гомоморфный зашифрованный подсчет]
+  B --> C[Хеш зашифрованного подсчета]
+  C --> D[TallyDecryptionShare от участника A]
+  C --> E[TallyDecryptionShare от участника B]
+  C --> F[TallyDecryptionShare от участника C]
+  D --> G{Есть >= 2 валидные доли?}
   E --> G
   F --> G
-  G -- да --> H[Decrypt aggregate result]
-  H --> I[result_hash]
-  I --> J[Verify / accept TallyResult]
-  G -- нет --> K[result unavailable]
+  G -- да --> H[Расшифровать общий результат]
+  H --> I[Хеш результата]
+  I --> J[Проверить и принять TallyResult]
+  G -- нет --> K[Результат недоступен]
 ```
 
-**Важно:** поздние валидные объекты могут сделать результат stale, тогда tally пересчитывается.
+**Важно:** поздние валидные объекты могут сделать результат устаревшим, тогда подсчет пересчитывается.
 
-<!-- speaker: 40 секунд. TallyResult не авторитетен. Узел проверяет decryption shares и сверяет result_hash с локально пересчитанным результатом. -->
+<!-- speaker: 40 секунд. TallyResult не авторитетен. Узел проверяет доли расшифровки и сверяет хеш результата с локально пересчитанным результатом. -->
 
 ---
 
-# End-to-End Timeline
+# Сквозная Временная Линия
 
 ```mermaid
 gantt
-  title LibreVote election lifecycle
+  title Жизненный цикл голосования LibreVote
   dateFormat  X
   axisFormat %s
-  section Trustee selection
-  Nomination                 :a1, 0, 10
-  Public trustee voting      :a2, 10, 20
-  Result verification        :a3, 20, 25
-  Consent                    :a4, 25, 35
-  section Activation
-  DKG contributions          :b1, 35, 45
+  section Выбор доверенных участников
+  Выдвижение кандидатов      :a1, 0, 10
+  Публичное голосование      :a2, 10, 20
+  Проверка результата        :a3, 20, 25
+  Согласие участников        :a4, 25, 35
+  section Активация
+  Вклады DKG                 :b1, 35, 45
   TallyKeySet                :b2, 45, 50
-  section Anonymous election
-  Blind token issuance       :c1, 50, 65
-  Anonymous voting           :c2, 65, 85
-  section Results
-  Decryption shares          :d1, 85, 95
-  TallyResult verification   :d2, 95, 100
+  section Анонимное голосование
+  Выдача слепых токенов      :c1, 50, 65
+  Анонимное голосование      :c2, 65, 85
+  section Результаты
+  Доли расшифровки           :d1, 85, 95
+  Проверка TallyResult       :d2, 95, 100
 ```
 
-**Переходы фаз задаются объектами и временными окнами.** Голосование становится operationally active только после валидного `TallyKeySet`.
+**Переходы фаз задаются объектами и временными окнами.** Голосование становится фактически активным только после валидного `TallyKeySet`.
 
-<!-- speaker: 35 секунд. Здесь связать все слои в один сценарий: сначала выбираем trustees, потом активируем anonymous election, потом issuance, voting и tally. -->
+<!-- speaker: 35 секунд. Здесь связать все слои в один сценарий: сначала выбираем доверенных участников, потом активируем анонимное голосование, потом выдача токенов, голосование и подсчет. -->
 
 ---
 
-# Threat Model: Что Защищаем
+# Модель Угроз: Что Защищаем
 
 ```mermaid
 flowchart TB
   subgraph Strong[Сильная сторона]
-    A[Object log audit]
-    B[Result recomputation]
-    C[Anonymous ballot crypto]
+    A[Аудит журнала объектов]
+    B[Пересчет результата]
+    C[Криптография анонимного бюллетеня]
   end
 
   subgraph Partial[Частично защищено]
-    D[Participation privacy]
-    E[Metadata reduction]
+    D[Приватность участия]
+    E[Снижение утечек метаданных]
   end
 
   subgraph NotGoal[Не обещаем]
-    F[Coercion resistance]
-    G[Receipt-freeness]
+    F[Защита от принуждения]
+    G[Невозможность доказать свой голос]
     H[Сильная сетевая анонимность]
     I[Защита при компрометации устройства]
   end
@@ -465,11 +491,11 @@ flowchart TB
   Partial --> NotGoal
 ```
 
-**Защищаем:** подмену объектов, result forgery, double voting, invalid decryption shares.
+**Защищаем:** подмену объектов, подделку результата, повторное голосование, невалидные доли расшифровки.
 
-**Не обещаем:** coercion resistance, receipt-freeness, сильную сетевую анонимность, защиту при компрометации локального устройства.
+**Не обещаем:** защиту от принуждения, невозможность доказать свой голос, сильную сетевую анонимность, защиту при компрометации локального устройства.
 
-<!-- speaker: 40 секунд. Честно проговорить границы. Если 2 из 3 trustees сговорились, они могут нарушить privacy threshold. Если меньше 2 доступны на tally, результат не раскрывается. -->
+<!-- speaker: 40 секунд. Честно проговорить границы. Если 2 из 3 доверенных участников сговорились, они могут нарушить порог приватности. Если меньше 2 доступны на этапе подсчета, результат не раскрывается. -->
 
 ---
 
@@ -477,17 +503,23 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-  A[Content-addressed objects] --> B[Immutable object log]
-  B --> C[Deterministic validation]
-  C --> D[Conflict exclusion]
-  D --> E[Derived state rebuild]
-  E --> F[Local result recomputation]
+  A[Объекты с адресацией по содержимому] --> B[Неизменяемый журнал объектов]
+  B --> C[Детерминированная проверка]
+  C --> D[Исключение конфликтов]
+  D --> E[Пересборка производного состояния]
+  E --> F[Локальный пересчет результата]
 
-  G[Blind tokens] --> H[Eligibility without voter in ballot]
-  I[Threshold encryption] --> J[2-of-3 result reveal]
+  G[Слепые токены] --> H[Право голоса без избирателя в бюллетене]
+  I[Пороговое шифрование] --> J[Раскрытие результата 2 из 3]
   H --> F
   J --> F
 
   K[P2P доставка] --> A
   K -. только доставка .-> B
 ```
+
+## Одно предложение
+
+LibreVote - это P2P-система, где доставка распространяет неизменяемые объекты, а доверие к голосованию появляется только после локальной криптографической проверки, исключения конфликтов и пересчета результата каждым узлом.
+
+<!-- speaker: 20 секунд. Закрыть презентацию одной фразой и вернуться к главному тезису: доставка не равна истине; истина локально пересчитывается. -->
