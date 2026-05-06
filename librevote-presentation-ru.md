@@ -1,22 +1,10 @@
----
-marp: true
-title: LibreVote - архитектура проверяемого P2P-голосования
-theme: default
-paginate: true
----
 
 
 # LibreVote
 
 ## Проверяемое P2P-голосование с анонимными бюллетенями
 
-**Тайминг: около 10 минут.** От CLI до результата, через каждый слой системы.
 
-`Object log + локальная валидация + blind tokens + threshold tally`
-
-<!-- speaker: 20 секунд. Главная мысль: LibreVote не просит доверять серверу. Каждый узел хранит объекты, сам их проверяет и сам пересчитывает результат. -->
-
----
 
 # Главный Тезис
 
@@ -153,7 +141,7 @@ flowchart LR
   B --> C[Multiaddr]
   C --> D[QUIC connection]
   D --> E[Streams]
-  E --> F[/librevote/... protocols]
+  E --> F["protocol streams"]
 ```
 
 **Что делает слой:**
@@ -454,20 +442,27 @@ gantt
 # Threat Model: Что Защищаем
 
 ```mermaid
-quadrantChart
-  title Security goals vs residual risks
-  x-axis Низкая приватность --> Высокая приватность
-  y-axis Низкая проверяемость --> Высокая проверяемость
-  quadrant-1 Сильная сторона
-  quadrant-2 Аудит без полной приватности
-  quadrant-3 Не цель
-  quadrant-4 Приватно, но зависит от trustee threshold
-  Object log audit: [0.30, 0.90]
-  Result recomputation: [0.35, 0.95]
-  Anonymous ballot crypto: [0.80, 0.75]
-  Сетевая анонимность: [0.25, 0.35]
-  Coercion resistance: [0.20, 0.25]
-  Local device compromise: [0.15, 0.20]
+flowchart TB
+  subgraph Strong[Сильная сторона]
+    A[Object log audit]
+    B[Result recomputation]
+    C[Anonymous ballot crypto]
+  end
+
+  subgraph Partial[Частично защищено]
+    D[Participation privacy]
+    E[Metadata reduction]
+  end
+
+  subgraph NotGoal[Не обещаем]
+    F[Coercion resistance]
+    G[Receipt-freeness]
+    H[Сильная сетевая анонимность]
+    I[Защита при компрометации устройства]
+  end
+
+  Strong --> Partial
+  Partial --> NotGoal
 ```
 
 **Защищаем:** подмену объектов, result forgery, double voting, invalid decryption shares.
@@ -496,4 +491,3 @@ flowchart TB
   K[P2P доставка] --> A
   K -. только доставка .-> B
 ```
-
